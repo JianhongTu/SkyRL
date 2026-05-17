@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REAL_DOCKER="${REAL_DOCKER:-/usr/bin/docker}"
+
+if [ "${1:-}" = "buildx" ]; then
+  subcommand="${2:-}"
+  case "$subcommand" in
+    version)
+      echo "github.com/docker/buildx compat-wrapper"
+      exit 0
+      ;;
+    use)
+      exit 0
+      ;;
+    build)
+      shift 2
+      args=(build)
+      while [ "$#" -gt 0 ]; do
+        case "$1" in
+          --progress=*)
+            shift
+            ;;
+          --progress)
+            shift
+            [ "$#" -gt 0 ] && shift
+            ;;
+          --load)
+            shift
+            ;;
+          --cache-from=type=local,*|--cache-to=type=local,*)
+            shift
+            ;;
+          *)
+            args+=("$1")
+            shift
+            ;;
+        esac
+      done
+      exec "$REAL_DOCKER" "${args[@]}"
+      ;;
+  esac
+fi
+
+exec "$REAL_DOCKER" "$@"
