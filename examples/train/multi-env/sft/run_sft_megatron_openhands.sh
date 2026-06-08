@@ -44,10 +44,14 @@ MAX_TOKENS_PER_MICROBATCH=32768   # packing bin capacity; must be a multiple of 
 BATCH_SIZE=32                     # global mini-batch (sequences); tune to throughput
 MICRO_BSZ_PER_GPU=1               # with packing, the token budget above governs the micro size
 
-# Train duration: by epochs unless NUM_STEPS is set (config errors if BOTH are passed).
-: "${NUM_EPOCHS:=3}"              # typical SFT 2-4 epochs
-: "${NUM_STEPS:=}"               # set NUM_STEPS=<N> to train by steps instead (e.g. smoke test)
-if [ -n "${NUM_STEPS}" ]; then DURATION="num_steps=${NUM_STEPS}"; else DURATION="num_epochs=${NUM_EPOCHS}"; fi
+# Train duration: cosine (any decaying scheduler) needs the real step HORIZON, so we pass
+# num_steps -- with num_epochs the scheduler's num_steps is None and the LR would not decay.
+# Derive it from the row count so it tracks BATCH_SIZE/NUM_EPOCHS; set NUM_STEPS to override.
+: "${DATASET_ROWS:=34685}"        # rows in DATA_DIR/train.parquet
+: "${NUM_EPOCHS:=3}"             # typical SFT 2-4 epochs
+: "${NUM_STEPS:=}"              # set NUM_STEPS=<N> to override directly (e.g. smoke test)
+if [ -z "${NUM_STEPS}" ]; then NUM_STEPS=$(( ((DATASET_ROWS + BATCH_SIZE - 1) / BATCH_SIZE) * NUM_EPOCHS )); fi
+DURATION="num_steps=${NUM_STEPS}"
 
 : "${LOGGER:=console}"            # set LOGGER=wandb (and WANDB_API_KEY) to log to wandb
 
@@ -73,7 +77,8 @@ uv run --isolated --extra megatron --python 3.12 \
     optimizer_config.weight_decay=1e-2 \
     optimizer_config.max_grad_norm=1.0 \
     optimizer_config.num_warmup_steps=100 \
-    optimizer_config.scheduler=constant_with_warmup \
+    optimizer_config.scheduler=cosine \
+    optimizer_config.min_lr=1e-6 \
     placement.num_nodes=1 \
     placement.num_gpus_per_node=$NUM_GPUS \
     megatron_config.tensor_model_parallel_size=$TP \
