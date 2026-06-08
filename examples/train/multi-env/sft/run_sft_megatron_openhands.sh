@@ -14,6 +14,16 @@ set -xeou pipefail
 #   bash examples/train/multi-env/sft/run_sft_megatron_openhands.sh [extra hydra overrides...]
 #   # e.g. smoke test:  NUM_STEPS=2 bash ...run_sft_megatron_openhands.sh dataset_split="train[:64]"
 #
+# Official Megatron container (deps -- TransformerEngine wheel etc. -- are prebuilt, so
+# `uv run --isolated --extra megatron` below reuses them rather than rebuilding):
+#   docker run -it --runtime=nvidia --gpus all --shm-size=64g --ipc=host \
+#     -v /mnt/swe:/mnt/swe -e HF_HOME=/mnt/swe/.cache/huggingface \
+#     novaskyai/skyrl-train-ray-2.51.1-py3.12-cu12.8-megatron /bin/bash
+#   # then inside (login shell so .bashrc sets RAY_RUNTIME_ENV_HOOK for the uv runtime env):
+#   cd /mnt/swe/SkyRL && git checkout multi-env-sft
+#   bash examples/train/multi-env/sft/run_sft_megatron_openhands.sh
+# SkyRL auto-sets the needed Megatron env (NVTE_FUSED_ATTN=0, CUDA_DEVICE_MAX_CONNECTIONS=1).
+#
 # Model note: Qwen3-30B-A3B is a Mixture-of-Experts model (30B total / ~3B active,
 # 128 experts). It needs real multi-GPU parallelism + (ideally) expert parallelism.
 # The PARALLELISM block below is a STARTING POINT for one 8x H200 node -- tune it
