@@ -38,6 +38,12 @@ PP=1          # pipeline model parallel
 CP=1          # context parallel (raise for very long seqs if attention OOMs)
 EP=1          # expert model parallel (raise to shard MoE experts; lets you lower TP for even higher DP)
 
+# --- MoE load-balancing aux loss -------------------------------------------
+# Keeps expert routing balanced during SFT (off by default in SkyRL). Match the
+# model's pretraining recipe if you can; 0 disables. Logged via get_moe_metrics.
+MOE_LB_TYPE=aux_loss              # aux_loss | seq_aux_loss | global_aux_loss
+: "${MOE_AUX_LOSS_COEFF:=1e-3}"   # coefficient; set 0 to turn the aux loss off
+
 # --- batch / length --------------------------------------------------------
 MAX_LENGTH=32768                  # matches the filter_by_length budget; rows are all < this
 MAX_TOKENS_PER_MICROBATCH=32768   # packing bin capacity; must be a multiple of MAX_LENGTH
@@ -86,6 +92,8 @@ uv run --isolated --extra megatron --python 3.12 \
     megatron_config.context_parallel_size=$CP \
     megatron_config.expert_model_parallel_size=$EP \
     megatron_config.moe_grouped_gemm=true \
+    megatron_config.moe_router_load_balancing_type=$MOE_LB_TYPE \
+    megatron_config.moe_aux_loss_coeff=$MOE_AUX_LOSS_COEFF \
     megatron_config.ddp_config.overlap_grad_reduce=true \
     megatron_config.ddp_config.overlap_param_gather=true \
     logger="$LOGGER" \
