@@ -43,12 +43,16 @@ drift is detectable.
 
 import argparse
 import json
+import multiprocessing as mp
 import os
 from collections import Counter
-from multiprocessing import Pool
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+
+# The Rust `tokenizers` threadpool is not fork-safe; disable it and use a spawn
+# pool below so loading a fast tokenizer in the parent can't deadlock workers.
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 # --- vendored from skyrl/train/sft_trainer.py (keep in sync) ----------------
 _NORMALIZED_KEYS = frozenset({"role", "content", "tool_calls"})
@@ -268,7 +272,8 @@ def main():
     # --- compute lengths over all rows (parallel by row group) ---
     n_procs = min(args.num_procs, n_rg)
     print(f"computing lengths with {n_procs} workers ...")
-    with Pool(n_procs, initializer=_init, initargs=(args.model, template)) as pool:
+    ctx = mp.get_context("spawn")
+    with ctx.Pool(n_procs, initializer=_init, initargs=(args.model, template)) as pool:
         results = pool.map(_process_rg, [(input_path, rg) for rg in range(n_rg)])
     lengths = [length for _, rg_lengths in sorted(results) for length in rg_lengths]
     assert len(lengths) == n_rows, f"length count {len(lengths)} != rows {n_rows}"
