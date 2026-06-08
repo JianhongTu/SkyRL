@@ -1,14 +1,21 @@
 #!/usr/bin/env python3
-"""Filter the OpenHands SFT dataset to rows that fit within a token budget.
+"""Fit the OpenHands SFT dataset to a token budget.
 
 Third step of the multi-env SFT pipeline::
 
     prepare_openhands.py  ->  openhands.parquet
     generate_sft.py       ->  train.parquet          (messages + tools)
-    filter_by_length.py   ->  train.parquet          (rows strictly under --max-length tokens)
+    filter_by_length.py   ->  train.parquet          (rows fit under --max-length)
 
-Keeps only rows whose tokenized length is **strictly below** ``--max-length``
-(default 32768), measured **exactly the way the SFT trainer tokenizes**.
+Two modes for handling rows over budget:
+
+* default (drop): keep only rows whose full tokenized length is **strictly below**
+  ``--max-length`` (default 32768); drop the rest.
+* ``--truncate``: keep every row but cut each over-long trajectory to the
+  **longest prefix that stays strictly below --max-length and ends on an
+  assistant action** (i.e. keep as many whole ``assistant -> observation`` steps
+  as fit; the trainer trims the trailing observation). A row whose very first
+  step already exceeds the budget is dropped.
 
 Why this isn't a single ``apply_chat_template`` call
 ----------------------------------------------------
@@ -20,21 +27,23 @@ with the per-message *fixed-base* encoder
 (``skyrl/train/generators/utils.py::encode_messages_subset``). The two differ:
 the fixed-base encoder renders each assistant turn as ``loop.last``, so an empty
 ``<think></think>`` block is injected on *every* no-reasoning assistant turn,
-whereas a single full render injects it at most once. A naive single render would
-therefore *under*-count and let too-long rows slip past the filter only to be
-truncated at train time. So we replicate the trainer's exact measure:
+whereas a single full render injects it at most once. So we replicate the
+trainer's exact measure::
 
     length = len(apply_chat_template(messages[:first_assistant], tools=tools))
            + sum_over_later_messages( fixed_base_token_delta(message) )
 
+The per-message deltas are **additive and position-independent**, which is what
+makes truncation exact: the tokenized length of any assistant-ending prefix is
+just the running sum of deltas, and equals what the trainer will produce for the
+truncated row.
+
 Speedup (verified, not assumed)
 -------------------------------
 The ``<tools>`` block lives in the system message, so it cancels out of every
-per-message fixed-base delta. We therefore pass ``tools=`` only on the leading
-render and drop it from the per-message deltas (avoids re-tokenizing the ~2k-token
-schema once per message). ``--verify-rows`` checks this fast path against the
-exact with-tools encoder on a sample and aborts on any mismatch before trusting
-it on the full dataset.
+per-message fixed-base delta. We pass ``tools=`` only on the leading render and
+drop it from the per-message deltas. ``--verify-rows`` checks this fast path
+against the exact with-tools encoder on a sample and aborts on any mismatch.
 
 The vendored ``_normalize_chat_messages`` / ``_normalize_tool_call_payload`` /
 ``_coerce_tools`` are line-for-line copies of the trainer's (file:line noted) so
@@ -87,7 +96,7 @@ def _normalize_tool_call_payload(tc):
 
 
 def _normalize_chat_messages(messages):
-    # sft_trainer.py:376
+    # sft_trainer.py:376 -- preserves order/count; promotes string tool_calls to list form.
     out = []
     for msg in messages:
         role = msg["role"]
@@ -149,7 +158,7 @@ def _prep(messages):
 
 
 def length_fast(messages, tools, tok, base_len_no_tools):
-    """Trainer-exact length, with the tools block dropped from per-message deltas."""
+    """Trainer-exact full-trajectory length, tools dropped from per-message deltas."""
     prep = _prep(messages)
     if prep is None:
         return None
@@ -174,19 +183,48 @@ def length_exact(messages, tools, tok):
     return total
 
 
+def truncate_keep_n(orig_messages, tools, tok, base_len_no_tools, max_length):
+    """Longest assistant-ending prefix with trainer-length < max_length.
+
+    Returns ``(keep_n, final_len)``: keep ``orig_messages[:keep_n]`` (ends on an
+    assistant turn, tokenizes to ``final_len`` < ``max_length``). ``(None, None)``
+    if not even the first assistant step fits, or there is no assistant turn.
+    """
+    n = len(orig_messages)
+    i = 0
+    while i < n and orig_messages[i]["role"] != "assistant":
+        i += 1
+    if i >= n:
+        return None, None
+    norm = _normalize_chat_messages(orig_messages)  # same order/count as orig -> keep_n indexes both
+    running = _apply_len(tok, norm[:i], **({"tools": tools} if tools else {}))
+    keep_n, final_len = None, None
+    for j in range(i, n):
+        running += _apply_len(tok, _BASE + [norm[j]]) - base_len_no_tools
+        if running >= max_length:
+            break
+        if orig_messages[j]["role"] == "assistant":
+            keep_n, final_len = j + 1, running
+    return keep_n, final_len
+
+
 # --- worker plumbing --------------------------------------------------------
 _TOK = None
 _BASE_LEN_NO_TOOLS = None
+_TRUNCATE = False
+_MAX_LENGTH = 0
 
 
-def _init(model, chat_template):
-    global _TOK, _BASE_LEN_NO_TOOLS
+def _init(model, chat_template, truncate, max_length):
+    global _TOK, _BASE_LEN_NO_TOOLS, _TRUNCATE, _MAX_LENGTH
     from transformers import AutoTokenizer
 
     _TOK = AutoTokenizer.from_pretrained(model)
     if chat_template is not None:
         _TOK.chat_template = chat_template
     _BASE_LEN_NO_TOOLS = _apply_len(_TOK, _BASE)
+    _TRUNCATE = truncate
+    _MAX_LENGTH = max_length
 
 
 def _process_rg(args):
@@ -195,8 +233,15 @@ def _process_rg(args):
     tbl = pf.read_row_group(rg, columns=["messages", "tools"])
     msgs = tbl.column("messages").to_pylist()
     tools_raw = tbl.column("tools").to_pylist()
-    lengths = [length_fast(m, _coerce_tools(t), _TOK, _BASE_LEN_NO_TOOLS) for m, t in zip(msgs, tools_raw)]
-    return rg, lengths
+    out = []
+    for m, t in zip(msgs, tools_raw):
+        tools = _coerce_tools(t)
+        if _TRUNCATE:
+            keep_n, final_len = truncate_keep_n(m, tools, _TOK, _BASE_LEN_NO_TOOLS, _MAX_LENGTH)
+            out.append((keep_n, final_len, len(m)))
+        else:
+            out.append(length_fast(m, tools, _TOK, _BASE_LEN_NO_TOOLS))
+    return rg, out
 
 
 def _load_tokenizer(model, chat_template_path):
@@ -223,12 +268,70 @@ def _percentiles(sorted_vals, ps):
     return {p: sorted_vals[max(0, min(n - 1, int(round(p / 100 * (n - 1)))))] for p in ps}
 
 
+def _histogram(values, max_length):
+    edges = [(0, 4096), (4096, 8192), (8192, 16384), (16384, max_length), (max_length, 65536), (65536, 1 << 30)]
+    labels = ["<4k", "4-8k", "8-16k", f"16k-{max_length}", f"{max_length}-64k", ">=64k"]
+    buckets = Counter()
+    for v in values:
+        for (lo, hi), lab in zip(edges, labels):
+            if lo <= v < hi:
+                buckets[lab] += 1
+                break
+    return {lab: buckets.get(lab, 0) for lab in labels}
+
+
+def _write_sliced(pf, keep_ns, output_path):
+    """Stream row groups, slice each row's messages to keep_ns[row], drop None rows."""
+    schema = pf.schema_arrow
+    msgs_t = schema.field("messages").type
+    tools_t = schema.field("tools").type
+    uuid_t = schema.field("uuid").type
+    writer = None
+    offset = 0
+    for rg in range(pf.num_row_groups):
+        tbl = pf.read_row_group(rg)
+        n = tbl.num_rows
+        msgs = tbl.column("messages").to_pylist()
+        tools = tbl.column("tools").to_pylist()
+        uuids = tbl.column("uuid").to_pylist()
+        rg_keep = keep_ns[offset : offset + n]
+        offset += n
+        nm, nt, nu = [], [], []
+        for m, t, u, kn in zip(msgs, tools, uuids, rg_keep):
+            if kn is None:
+                continue
+            nm.append(m[:kn])
+            nt.append(t)
+            nu.append(u)
+        if not nm:
+            continue
+        out = pa.table(
+            {
+                "messages": pa.array(nm, type=msgs_t),
+                "tools": pa.array(nt, type=tools_t),
+                "uuid": pa.array(nu, type=uuid_t),
+            }
+        ).select(schema.names)
+        if writer is None:
+            writer = pq.ParquetWriter(output_path, out.schema)
+        writer.write_table(out)
+    if writer is None:
+        raise RuntimeError("No rows survived; refusing to write an empty dataset.")
+    writer.close()
+
+
 def main():
-    parser = argparse.ArgumentParser(description="Filter SFT rows to those strictly under a token budget.")
+    parser = argparse.ArgumentParser(description="Fit SFT rows to a token budget (drop or truncate).")
     parser.add_argument("--input", default="~/data/nemotron_sft_swe_v3_openhands_sft/train.parquet")
     parser.add_argument("--output-dir", default="~/data/nemotron_sft_swe_v3_openhands_sft_max32k")
     parser.add_argument("--output-file", default="train.parquet", help="Output filename (stem becomes the HF split).")
-    parser.add_argument("--max-length", type=int, default=32768, help="Keep rows with length STRICTLY below this.")
+    parser.add_argument("--max-length", type=int, default=32768, help="Token budget; rows must be STRICTLY below this.")
+    parser.add_argument(
+        "--truncate",
+        action="store_true",
+        help="Truncate over-long trajectories to the longest assistant-ending prefix that fits, "
+        "instead of dropping them.",
+    )
     parser.add_argument("--model", default="willhx/Qwen3-30B-A3B_base_math_search", help="Tokenizer to load.")
     parser.add_argument(
         "--chat-template",
@@ -247,8 +350,9 @@ def main():
     pf = pq.ParquetFile(input_path)
     n_rows = pf.metadata.num_rows
     n_rg = pf.num_row_groups
+    mode = "TRUNCATE over-long rows" if args.truncate else "DROP over-long rows"
     print(f"input: {input_path}  rows={n_rows}  row_groups={n_rg}")
-    print(f"keep rows with tokenized length < {args.max_length} (strict)")
+    print(f"mode: {mode}; budget = length STRICTLY < {args.max_length}")
 
     tok, template = _load_tokenizer(args.model, args.chat_template)
     base_len_no_tools = _apply_len(tok, _BASE)
@@ -256,68 +360,26 @@ def main():
     # --- verify the fast path == the exact (with-tools) encoder on a sample ---
     if args.verify_rows > 0:
         sample = pf.read_row_group(0, columns=["messages", "tools"])
-        msgs = sample.column("messages").to_pylist()[: args.verify_rows]
-        tools_raw = sample.column("tools").to_pylist()[: args.verify_rows]
+        s_msgs = sample.column("messages").to_pylist()[: args.verify_rows]
+        s_tools = sample.column("tools").to_pylist()[: args.verify_rows]
         max_diff = 0
-        for m, t in zip(msgs, tools_raw):
+        for m, t in zip(s_msgs, s_tools):
             tools = _coerce_tools(t)
-            lf = length_fast(m, tools, tok, base_len_no_tools)
-            le = length_exact(m, tools, tok)
-            if lf != le:
-                max_diff = max(max_diff, abs((lf or 0) - (le or 0)))
+            max_diff = max(
+                max_diff, abs((length_fast(m, tools, tok, base_len_no_tools) or 0) - (length_exact(m, tools, tok) or 0))
+            )
         if max_diff != 0:
             raise SystemExit(f"VERIFY FAILED: fast vs exact length differ (max abs diff {max_diff}).")
-        print(f"verify OK: fast == exact on {len(msgs)} rows (max abs diff 0)")
+        print(f"verify OK: fast == exact on {len(s_msgs)} rows (max abs diff 0)")
 
-    # --- compute lengths over all rows (parallel by row group) ---
+    # --- compute over all rows (parallel by row group) ---
     n_procs = min(args.num_procs, n_rg)
-    print(f"computing lengths with {n_procs} workers ...")
+    print(f"computing with {n_procs} workers ...")
     ctx = mp.get_context("spawn")
-    with ctx.Pool(n_procs, initializer=_init, initargs=(args.model, template)) as pool:
+    with ctx.Pool(n_procs, initializer=_init, initargs=(args.model, template, args.truncate, args.max_length)) as pool:
         results = pool.map(_process_rg, [(input_path, rg) for rg in range(n_rg)])
-    lengths = [length for _, rg_lengths in sorted(results) for length in rg_lengths]
-    assert len(lengths) == n_rows, f"length count {len(lengths)} != rows {n_rows}"
-
-    # --- build keep mask (strict) ---
-    mask = [length is not None and length < args.max_length for length in lengths]
-    rows_out = sum(mask)
-    dropped_too_long = sum(1 for length in lengths if length is not None and length >= args.max_length)
-    dropped_no_trailing_assistant = sum(1 for length in lengths if length is None)
-
-    # --- write kept rows (streamed, schema preserved) ---
-    writer = None
-    offset = 0
-    for rg in range(n_rg):
-        tbl = pf.read_row_group(rg)
-        n = tbl.num_rows
-        kept = tbl.filter(pa.array(mask[offset : offset + n], type=pa.bool_()))
-        offset += n
-        if kept.num_rows:
-            if writer is None:
-                writer = pq.ParquetWriter(output_path, kept.schema)
-            writer.write_table(kept)
-    if writer is None:
-        raise RuntimeError("No rows passed the length filter; refusing to write an empty dataset.")
-    writer.close()
-
-    # --- report ---
-    present = sorted(length for length in lengths if length is not None)
-    pcts = _percentiles(present, [50, 90, 95, 99, 100])
-    buckets = Counter()
-    edges = [
-        (0, 4096),
-        (4096, 8192),
-        (8192, 16384),
-        (16384, args.max_length),
-        (args.max_length, 65536),
-        (65536, 1 << 30),
-    ]
-    labels = ["<4k", "4-8k", "8-16k", f"16k-{args.max_length}", f"{args.max_length}-64k", ">=64k"]
-    for length in present:
-        for (lo, hi), lab in zip(edges, labels):
-            if lo <= length < hi:
-                buckets[lab] += 1
-                break
+    rows = [item for _, rg_items in sorted(results) for item in rg_items]
+    assert len(rows) == n_rows, f"row count {len(rows)} != rows {n_rows}"
 
     report = {
         "input": input_path,
@@ -326,24 +388,85 @@ def main():
         "chat_template": args.chat_template or f"tokenizer-default:{args.model}",
         "max_length": args.max_length,
         "strict_less_than": True,
+        "mode": "truncate" if args.truncate else "drop",
         "rows_in": n_rows,
-        "rows_out": rows_out,
-        "dropped_too_long": dropped_too_long,
-        "dropped_no_trailing_assistant": dropped_no_trailing_assistant,
-        "length_percentiles": {f"p{p}": pcts[p] for p in [50, 90, 95, 99]}
-        | {"max": pcts[100], "min": present[0] if present else None},
-        "length_histogram": {lab: buckets.get(lab, 0) for lab in labels},
     }
+
+    if args.truncate:
+        keep_ns = [keep_n for (keep_n, _, _) in rows]
+        rows_out = sum(1 for kn in keep_ns if kn is not None)
+        dropped = sum(1 for kn in keep_ns if kn is None)
+        truncated = sum(1 for (kn, _, norig) in rows if kn is not None and kn < norig)
+        kept_whole = sum(1 for (kn, _, norig) in rows if kn is not None and kn == norig)
+        msgs_removed = sum((norig - kn) for (kn, _, norig) in rows if kn is not None)
+        final_lens = sorted(fl for (kn, fl, _) in rows if kn is not None)
+        pcts = _percentiles(final_lens, [50, 90, 95, 99, 100])
+        _write_sliced(pf, keep_ns, output_path)
+        report.update(
+            {
+                "rows_out": rows_out,
+                "rows_dropped_first_step_over_budget": dropped,
+                "rows_truncated": truncated,
+                "rows_kept_whole": kept_whole,
+                "messages_removed_total": msgs_removed,
+                "final_length_percentiles": {f"p{p}": pcts[p] for p in [50, 90, 95, 99]}
+                | {"max": pcts[100], "min": final_lens[0] if final_lens else None},
+                "final_length_histogram": _histogram(final_lens, args.max_length),
+            }
+        )
+        print("\n=== filter_by_length report (truncate) ===")
+        print(f"rows_in:        {n_rows}")
+        print(f"rows_out:       {rows_out}  ({100 * rows_out / n_rows:.1f}%)")
+        print(f"  kept whole:   {kept_whole}")
+        print(f"  truncated:    {truncated}")
+        print(f"DROPPED (first step over budget): {dropped}")
+        print(f"messages removed (total): {msgs_removed}")
+        print(f"final length percentiles: {report['final_length_percentiles']}")
+        print(f"final length histogram:   {report['final_length_histogram']}")
+    else:
+        lengths = rows
+        mask = [length is not None and length < args.max_length for length in lengths]
+        rows_out = 0
+        too_long = sum(1 for length in lengths if length is not None and length >= args.max_length)
+        no_assistant = sum(1 for length in lengths if length is None)
+        # write via mask filter (exact passthrough, no round-trip)
+        writer = None
+        offset = 0
+        for rg in range(n_rg):
+            tbl = pf.read_row_group(rg)
+            n = tbl.num_rows
+            kept = tbl.filter(pa.array(mask[offset : offset + n], type=pa.bool_()))
+            offset += n
+            rows_out += kept.num_rows
+            if kept.num_rows:
+                if writer is None:
+                    writer = pq.ParquetWriter(output_path, kept.schema)
+                writer.write_table(kept)
+        if writer is None:
+            raise RuntimeError("No rows passed the length filter; refusing to write an empty dataset.")
+        writer.close()
+        present = sorted(length for length in lengths if length is not None)
+        pcts = _percentiles(present, [50, 90, 95, 99, 100])
+        report.update(
+            {
+                "rows_out": rows_out,
+                "dropped_too_long": too_long,
+                "dropped_no_trailing_assistant": no_assistant,
+                "length_percentiles": {f"p{p}": pcts[p] for p in [50, 90, 95, 99]}
+                | {"max": pcts[100], "min": present[0] if present else None},
+                "length_histogram": _histogram(present, args.max_length),
+            }
+        )
+        print("\n=== filter_by_length report (drop) ===")
+        print(f"rows_in:  {n_rows}")
+        print(f"rows_out: {rows_out}  ({100 * rows_out / n_rows:.1f}%)")
+        print(f"DROPPED too long (>= {args.max_length}): {too_long}")
+        print(f"DROPPED no trailing assistant: {no_assistant}")
+        print(f"length percentiles: {report['length_percentiles']}")
+        print(f"length histogram:   {report['length_histogram']}")
+
     with open(os.path.join(output_dir, "filter_by_length_report.json"), "w") as f:
         json.dump(report, f, indent=2)
-
-    print("\n=== filter_by_length report ===")
-    print(f"rows_in:  {report['rows_in']}")
-    print(f"rows_out: {report['rows_out']}  ({100 * rows_out / n_rows:.1f}%)")
-    print(f"DROPPED too long (>= {args.max_length}): {dropped_too_long}")
-    print(f"DROPPED no trailing assistant (trainer would skip): {dropped_no_trailing_assistant}")
-    print(f"length percentiles: {report['length_percentiles']}")
-    print(f"length histogram:   {report['length_histogram']}")
     print(f"Output: {output_path}")
 
 
