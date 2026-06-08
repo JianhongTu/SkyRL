@@ -72,7 +72,7 @@ uv run --isolated --extra megatron --python 3.12 \
     optimizer_config.lr=1e-5 \
     optimizer_config.weight_decay=1e-2 \
     optimizer_config.max_grad_norm=1.0 \
-    optimizer_config.num_warmup_steps=20 \
+    optimizer_config.num_warmup_steps=100 \
     optimizer_config.scheduler=constant_with_warmup \
     placement.num_nodes=1 \
     placement.num_gpus_per_node=$NUM_GPUS \
@@ -80,6 +80,7 @@ uv run --isolated --extra megatron --python 3.12 \
     megatron_config.pipeline_model_parallel_size=$PP \
     megatron_config.context_parallel_size=$CP \
     megatron_config.expert_model_parallel_size=$EP \
+    megatron_config.moe_grouped_gemm=true \
     megatron_config.ddp_config.overlap_grad_reduce=true \
     megatron_config.ddp_config.overlap_param_gather=true \
     logger="$LOGGER" \
