@@ -26,13 +26,17 @@ set -xeou pipefail
 : "${MODEL_PATH:=willhx/Qwen3-30B-A3B_base_math_search}"
 
 # --- parallelism (TUNE to your GPUs/model) ---------------------------------
-# world_size = NUM_GPUS = TP * PP * CP * DP. EP shards MoE experts.
-# Qwen3-30B-A3B has 4 KV heads -> keep TP a divisor of 4 (TP<=4). 48 layers -> PP up to 48.
+# world_size = NUM_GPUS = TP * PP * CP * DP  (DP is derived, not set). EP shards MoE experts.
+# We prefer HIGH DP so the (always-on) distributed optimizer shards optimizer state widely:
+#   DP = NUM_GPUS / (TP*PP*CP) = 8 / (2*1*1) = 4.
+# TP=2 keeps params sharded enough for a 30B model to fit on 143GB H200s while maximizing DP.
+# Qwen3-30B-A3B has 4 KV heads -> TP must divide 4 (TP<=4). To push DP to 8, add EP (e.g.
+# TP=1, EP=8 shards experts) -- validate that combo with the smoke test first.
 NUM_GPUS=8
-TP=4          # tensor model parallel  (<=4 for this model's KV heads)
-PP=2          # pipeline model parallel (48 layers / PP per stage)
+TP=2          # tensor model parallel (<=4 for this model's 4 KV heads)
+PP=1          # pipeline model parallel
 CP=1          # context parallel (raise for very long seqs if attention OOMs)
-EP=1          # expert model parallel (raise to shard MoE experts for throughput, e.g. 4 or 8)
+EP=1          # expert model parallel (raise to shard MoE experts; lets you lower TP for even higher DP)
 
 # --- batch / length --------------------------------------------------------
 MAX_LENGTH=32768                  # matches the filter_by_length budget; rows are all < this
@@ -76,6 +80,8 @@ uv run --isolated --extra megatron --python 3.12 \
     megatron_config.pipeline_model_parallel_size=$PP \
     megatron_config.context_parallel_size=$CP \
     megatron_config.expert_model_parallel_size=$EP \
+    megatron_config.ddp_config.overlap_grad_reduce=true \
+    megatron_config.ddp_config.overlap_param_gather=true \
     logger="$LOGGER" \
     project_name=skyrl_sft \
     run_name=skyrl_sft_openhands_qwen3_30b_a3b \
