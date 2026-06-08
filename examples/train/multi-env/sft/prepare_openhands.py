@@ -55,6 +55,7 @@ import argparse
 import json
 import os
 
+import pyarrow as pa
 import pyarrow.parquet as pq
 
 # OpenHands CodeActAgent tool interface. REQUIRED must be present; the full set
@@ -196,7 +197,10 @@ def prepare(
         total_in += len(df)
         total_out += len(keep_idx)
 
-        kept = table.take(keep_idx)
+        # Build an explicitly-typed index array: an empty Python list would make
+        # pyarrow infer a null-typed array and `take` would raise (some shards keep
+        # zero OpenHands trajectories).
+        kept = table.take(pa.array(keep_idx, type=pa.int64()))
         if single_file:
             if writer is None:
                 writer = pq.ParquetWriter(single_path, kept.schema)
