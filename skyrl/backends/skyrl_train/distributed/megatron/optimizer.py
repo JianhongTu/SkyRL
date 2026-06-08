@@ -62,6 +62,20 @@ def get_megatron_optimizer(
     )
 
 
+# Map SkyRL/HF scheduler names to Megatron OptimizerParamScheduler lr_decay_style.
+# HF "cosine"/"linear" mean "warmup then decay" == Megatron lr_decay_style + lr_warmup_steps.
+# NOTE: decaying styles need a real horizon -- pass the true total via num_training_steps
+# (e.g. set num_steps; with num_epochs it is None and the LR will not decay).
+_HF_TO_MEGATRON_DECAY_STYLE = {
+    "constant_with_warmup": "constant",
+    "constant": "constant",
+    "cosine": "cosine",
+    "cosine_with_min_lr": "cosine",
+    "linear": "linear",
+    "inverse_sqrt": "inverse-square-root",
+}
+
+
 def get_megatron_optimizer_param_scheduler(
     optimizer,
     config: Union[SkyRLOptimizerConfig, DictConfig],
@@ -70,9 +84,13 @@ def get_megatron_optimizer_param_scheduler(
     """
     Get the optimizer parameter scheduler for Megatron.
     """
-    # TODO: support other schedulers for Megatron
-    if getattr(config, "scheduler", "constant_with_warmup") != "constant_with_warmup":
-        raise ValueError("Only constant_with_warmup scheduler is supported for Megatron")
+    scheduler_name = getattr(config, "scheduler", "constant_with_warmup")
+    if scheduler_name not in _HF_TO_MEGATRON_DECAY_STYLE:
+        raise ValueError(
+            f"Unsupported scheduler {scheduler_name!r} for Megatron; "
+            f"supported: {sorted(_HF_TO_MEGATRON_DECAY_STYLE)}"
+        )
+    lr_decay_style = _HF_TO_MEGATRON_DECAY_STYLE[scheduler_name]
 
     lr_warmup_steps = config.num_warmup_steps
     if getattr(config, "lr_decay_steps", None) is None:
@@ -89,7 +107,7 @@ def get_megatron_optimizer_param_scheduler(
         min_lr=getattr(config, "min_lr", 0.0),
         lr_warmup_steps=lr_warmup_steps,
         lr_decay_steps=lr_decay_steps,
-        lr_decay_style="constant",
+        lr_decay_style=lr_decay_style,
         start_wd=config.weight_decay,
         end_wd=config.weight_decay,
         wd_incr_steps=num_training_steps,

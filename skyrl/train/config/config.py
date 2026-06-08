@@ -122,6 +122,8 @@ class OptimizerConfig(BaseConfig):
     num_warmup_steps: int = 0
     """Number of mini-batch steps to warmup the optimizer."""
     scheduler: str = "constant_with_warmup"
+    min_lr: float = 0.0
+    """Floor LR for decaying schedulers (e.g. cosine/linear). 0.0 decays to zero."""
 
 
 @dataclass
