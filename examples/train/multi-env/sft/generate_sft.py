@@ -175,6 +175,16 @@ def _count_assistant_tool_calls(messages) -> int:
     return worst
 
 
+class _UnparseableToolArgs(Exception):
+    """A tool call whose ``arguments`` can't be resolved to a dict.
+
+    Raised by ``rewrite_tool_calls`` and caught in ``transform_row`` to DROP the
+    whole trajectory. Emitting the call with empty ``{}`` args instead would teach
+    the model a tool call missing its required args (e.g. ``str_replace_editor``
+    without ``command``/``path``), which the rollout parser then hard-errors on.
+    """
+
+
 def rewrite_tool_calls(tool_calls_field, allowlist: dict, stats: dict) -> tuple[str, bool]:
     """Strip non-schema args (and coerce bool enum args) from a message's tool_calls.
 
@@ -186,6 +196,9 @@ def rewrite_tool_calls(tool_calls_field, allowlist: dict, stats: dict) -> tuple[
     ``task_completed`` are string enums), and the rollout parser/runtime compares
     them as strings, so a JSON bool in the source is coerced to ``"true"``/
     ``"false"`` to keep SFT and rollout consistent.
+
+    Raises ``_UnparseableToolArgs`` if a call's ``arguments`` can't be resolved to a
+    dict (unparseable JSON string, or a non-dict payload) so the caller drops the row.
     """
     if not tool_calls_field or tool_calls_field in ("[]", ""):
         return tool_calls_field or "", False
@@ -210,10 +223,10 @@ def rewrite_tool_calls(tool_calls_field, allowlist: dict, stats: dict) -> tuple[
         if isinstance(args, str):
             try:
                 args = json.loads(args)
-            except json.JSONDecodeError:
-                args = {}
+            except json.JSONDecodeError as e:
+                raise _UnparseableToolArgs(name or "<unknown>") from e
         if not isinstance(args, dict):
-            args = {}
+            raise _UnparseableToolArgs(name or "<unknown>")
         allowed = allowlist.get(name, frozenset())
         clean = {}
         for k, v in args.items():
@@ -263,10 +276,17 @@ def transform_row(messages, allowlist: dict, stats: dict):
         stats["rows_no_trailing_assistant"] += 1
 
     # Strip non-schema args (and coerce bool enum args) on every assistant tool_call.
+    # Drop #3: a tool call whose arguments can't be resolved to a dict (would otherwise
+    # be emitted with empty {} args and hard-error the rollout parser at train time).
     row_modified = False
     for m in messages:
         if m.get("role") == "assistant" and m.get("tool_calls"):
-            new_tc, modified = rewrite_tool_calls(m["tool_calls"], allowlist, stats)
+            try:
+                new_tc, modified = rewrite_tool_calls(m["tool_calls"], allowlist, stats)
+            except _UnparseableToolArgs as bad:
+                stats["rows_dropped_unparseable_args"] += 1
+                stats["unparseable_arg_tools"][str(bad)] += 1
+                return None
             m["tool_calls"] = new_tc
             row_modified = row_modified or modified
         # Normalize struct fields to non-null strings (assign unconditionally:
@@ -322,11 +342,13 @@ def main():
         "rows_out": 0,
         "rows_dropped_unsupported_tools": 0,
         "rows_dropped_multi_toolcall": 0,
+        "rows_dropped_unparseable_args": 0,
         "rows_no_trailing_assistant": 0,
         "trajectories_modified": 0,
         "dropped_args": Counter(),
         "coerced_bool_args": Counter(),
         "dropped_tool_names": Counter(),
+        "unparseable_arg_tools": Counter(),
     }
     out_rows = []
     done = False
@@ -356,7 +378,8 @@ def main():
         raise RuntimeError(
             f"No rows survived filtering (rows_in={stats['rows_in']}, "
             f"dropped_unsupported_tools={stats['rows_dropped_unsupported_tools']}, "
-            f"dropped_multi_toolcall={stats['rows_dropped_multi_toolcall']}). "
+            f"dropped_multi_toolcall={stats['rows_dropped_multi_toolcall']}, "
+            f"dropped_unparseable_args={stats['rows_dropped_unparseable_args']}). "
             "Refusing to write an empty/schema-less parquet."
         )
 
@@ -376,6 +399,8 @@ def main():
         "rows_dropped_unsupported_tools": stats["rows_dropped_unsupported_tools"],
         "dropped_tool_names": dict(stats["dropped_tool_names"].most_common()),
         "rows_dropped_multi_toolcall": stats["rows_dropped_multi_toolcall"],
+        "rows_dropped_unparseable_args": stats["rows_dropped_unparseable_args"],
+        "unparseable_arg_tools": dict(stats["unparseable_arg_tools"].most_common()),
         "rows_no_trailing_assistant_train_time_drop": stats["rows_no_trailing_assistant"],
         "trajectories_modified": stats["trajectories_modified"],
         "args_stripped_by_key": dict(stats["dropped_args"].most_common()),
@@ -391,6 +416,9 @@ def main():
         f"DROPPED unsupported tools (trajectory loss): {report['rows_dropped_unsupported_tools']} {report['dropped_tool_names']}"
     )
     print(f"DROPPED multi-tool-call turns (trajectory loss): {report['rows_dropped_multi_toolcall']}")
+    print(
+        f"DROPPED unparseable tool-call args (trajectory loss): {report['rows_dropped_unparseable_args']} {report['unparseable_arg_tools']}"
+    )
     print(f"would drop at train time (no trailing assistant): {report['rows_no_trailing_assistant_train_time_drop']}")
     print(f"MODIFIED (kept) trajectories: {report['trajectories_modified']}")
     print(f"  args stripped by key: {report['args_stripped_by_key']}")

@@ -47,6 +47,25 @@ def init_megatron_optim_config(
     }
     optim_args.update(optimizer_config_kwargs)
 
+    # dtype-valued OptimizerConfig kwargs (e.g. precision-aware optimizer state dtypes) can't be
+    # expressed as torch.dtype in OmegaConf/CLI, so accept string aliases and convert here. This
+    # enables the BF16 optimizer-state memory relief: use_precision_aware_optimizer=True with
+    # exp_avg_dtype=bf16 exp_avg_sq_dtype=bf16 (~50% optimizer-state memory vs fp32).
+    _DTYPE_ALIASES = {
+        "bf16": torch.bfloat16,
+        "bfloat16": torch.bfloat16,
+        "fp16": torch.float16,
+        "float16": torch.float16,
+        "fp32": torch.float32,
+        "float32": torch.float32,
+    }
+    for _k in ("exp_avg_dtype", "exp_avg_sq_dtype", "main_grads_dtype", "main_params_dtype", "params_dtype"):
+        _v = optim_args.get(_k)
+        if isinstance(_v, str):
+            if _v not in _DTYPE_ALIASES:
+                raise ValueError(f"Unsupported dtype {_v!r} for {_k}; expected one of {sorted(_DTYPE_ALIASES)}")
+            optim_args[_k] = _DTYPE_ALIASES[_v]
+
     config = OptimizerConfig(**optim_args)
     return config
 
