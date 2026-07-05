@@ -22,8 +22,11 @@ the rollout agent's parser rejects.
 
 This script produces ``train.parquet`` with columns:
   * ``messages`` — same struct, with ``tool_calls`` rewritten (non-schema args
-    stripped). The per-row system prompt stays as ``messages[0]`` (we keep the
-    Nemotron personas; no separate ``system`` column).
+    stripped) and ``messages[0]`` (the lone system turn) **replaced** by the exact
+    system prompt the rollout harness sends (``get_system_message()``). The Nemotron
+    rows bake in a ~12.8k-char OpenHands CodeAct prompt the rollout/eval harness never
+    emits (it sends a 386-char prompt); training on the baked-in prompt is pure
+    train/rollout skew, so we overwrite it. No separate ``system`` column.
   * ``tools``    — JSON string, identical for every row: the 4 OpenHands tool
     schemas in ``_get_tools()`` order [execute_bash, think, finish,
     str_replace_editor]. The SFT trainer's ``_coerce_tools`` parses it and
@@ -36,6 +39,8 @@ Transforms (see the plan):
   2. Strip tool-call args not in the tool's declared schema (e.g. ``security_risk``,
      ``timeout``). Trajectory is kept; only the offending arg is removed. Required:
      the rollout parser HARD-ERRORS on unexpected args for str_replace_editor edits.
+  3. Overwrite ``messages[0]`` with the harness system prompt (consistency swap;
+     see above). Trajectory is kept; only the system turn's content changes.
 
 Train it with ``train_on_what=all_assistant_messages`` (the agent sees prior
 turns' thinking, so every assistant turn is supervised).
@@ -76,6 +81,20 @@ _EXPECTED_PARAMS = {
 }
 
 _TOOLS_JSON_FALLBACK = os.path.join(os.path.dirname(os.path.abspath(__file__)), "openhands_tools.json")
+_SYSTEM_PROMPT_FALLBACK = os.path.join(os.path.dirname(os.path.abspath(__file__)), "openhands_system_prompt.txt")
+
+# The rollout harness is OUR OpenHands fork (../SkyRL-OpenHands, branch feature/mounted-runtime-r2e):
+# its codeact_agent/prompts/system_prompt.j2 renders the SHORT 386-char "You are a programming agent…"
+# harness prompt. UPSTREAM OpenHands renders a ~12.8k-char "You are OpenHands agent…" CodeAct prompt —
+# importing THAT would silently re-bake the exact train/rollout skew this swap exists to remove. So the
+# import path is bounded by these sanity limits and falls back to the checked-in copy if they're violated.
+_HARNESS_PROMPT_PREFIX = "You are a programming agent"
+_HARNESS_PROMPT_MAX_CHARS = 2000
+
+
+def _is_harness_prompt(s: str) -> bool:
+    """True iff ``s`` looks like our fork's short harness prompt (not upstream's ~12.8k CodeAct one)."""
+    return bool(s) and s.startswith(_HARNESS_PROMPT_PREFIX) and len(s) <= _HARNESS_PROMPT_MAX_CHARS
 
 
 # ---------------------------------------------------------------------------
@@ -111,6 +130,56 @@ def build_tools(tools_json_path: str | None = None) -> list[dict]:
         print(f"NOTE: openhands not importable; using checked-in tool schemas at {_TOOLS_JSON_FALLBACK}")
         with open(_TOOLS_JSON_FALLBACK) as f:
             return json.load(f)
+
+
+def build_system_prompt(system_prompt_path: str | None = None) -> str:
+    """Return the system message the rollout harness sends, for messages[0].
+
+    Import-first from OUR OpenHands fork (byte-match with its ``get_system_message()``), falling back to
+    the checked-in ``openhands_system_prompt.txt`` if the fork isn't importable. Both branches ``.strip()``
+    so the value equals ``get_system_message()`` exactly (``PromptManager`` renders ``system_prompt.j2``
+    and strips).
+
+    GUARD: the import path trusts whatever ``openhands`` is installed, and UPSTREAM OpenHands renders a
+    ~12.8k-char "You are OpenHands agent…" CodeAct prompt — NOT our fork's 386-char harness prompt. Baking
+    that would silently reintroduce the train/rollout skew this swap removes, so we validate the imported
+    string looks like the fork's harness prompt (``_is_harness_prompt``) and fall back to the checked-in
+    copy if not. The final assert then guarantees the returned prompt is always the harness prompt (also
+    catching a stale/corrupt fallback). An explicit ``--system-prompt`` override is trusted as-is (only
+    checked non-empty) — that's the escape hatch for deliberately training on a different prompt.
+    """
+    if system_prompt_path:
+        with open(os.path.expanduser(system_prompt_path)) as f:
+            prompt = f.read().strip()
+        assert prompt, f"--system-prompt file is empty: {system_prompt_path}"
+        return prompt
+
+    prompt = None
+    try:
+        import openhands.agenthub.codeact_agent as _codeact
+        from openhands.utils.prompt import PromptManager
+
+        prompt_dir = os.path.join(os.path.dirname(_codeact.__file__), "prompts")
+        prompt = PromptManager(prompt_dir=prompt_dir).get_system_message()
+    except Exception as e:  # not importable / API drift — use the checked-in copy
+        print(f"NOTE: openhands system prompt unavailable ({type(e).__name__}); using {_SYSTEM_PROMPT_FALLBACK}")
+
+    # Import must yield our fork's SHORT prompt; if it's upstream's ~12.8k one (or import failed), fall back.
+    if not _is_harness_prompt(prompt or ""):
+        if prompt is not None:
+            print(
+                f"NOTE: imported system prompt is not the fork's harness prompt "
+                f"({len(prompt)} chars, starts {prompt[:32]!r}); using {_SYSTEM_PROMPT_FALLBACK}"
+            )
+        with open(_SYSTEM_PROMPT_FALLBACK) as f:
+            prompt = f.read().strip()
+
+    assert _is_harness_prompt(prompt), (
+        f"system prompt failed validation ({len(prompt)} chars, starts {prompt[:40]!r}); expected our "
+        f"OpenHands fork's harness prompt (prefix {_HARNESS_PROMPT_PREFIX!r}, <{_HARNESS_PROMPT_MAX_CHARS} "
+        f"chars). Check {_SYSTEM_PROMPT_FALLBACK} matches ../SkyRL-OpenHands codeact_agent system_prompt.j2."
+    )
+    return prompt
 
 
 def param_allowlist(tools: list[dict]) -> dict[str, frozenset]:
@@ -249,7 +318,7 @@ def rewrite_tool_calls(tool_calls_field, allowlist: dict, stats: dict) -> tuple[
     return json.dumps(out, ensure_ascii=False), modified
 
 
-def transform_row(messages, allowlist: dict, stats: dict):
+def transform_row(messages, allowlist: dict, system_prompt: str, stats: dict):
     """Transform one trajectory. Returns new messages list, or None to drop."""
     messages = [dict(m) for m in messages]
 
@@ -296,6 +365,17 @@ def transform_row(messages, allowlist: dict, stats: dict):
         m["tool_calls"] = m.get("tool_calls") or ""
     if row_modified:
         stats["trajectories_modified"] += 1
+
+    # Consistency swap: overwrite the baked-in (~12.8k-char) OpenHands system prompt
+    # with the exact string the rollout harness sends, so the model conditions at
+    # train time on the same system turn it sees at rollout. messages[0] is always the
+    # lone system turn (verified: exactly 1 system msg/row, always at position 0).
+    if messages and messages[0].get("role") == "system":
+        if messages[0].get("content") != system_prompt:
+            stats["rows_system_prompt_replaced"] += 1
+        messages[0]["content"] = system_prompt
+    else:
+        stats["rows_no_system_msg"] += 1
     return messages
 
 
@@ -315,6 +395,9 @@ def main():
     parser.add_argument("--output-file", default="train.parquet", help="Output filename (stem becomes the HF split).")
     parser.add_argument(
         "--tools-json", default=None, help="Override path to tool schemas JSON (else import-then-fallback)."
+    )
+    parser.add_argument(
+        "--system-prompt", default=None, help="Override path to system prompt text (else import-then-fallback)."
     )
     parser.add_argument("--num-rows", type=int, default=None, help="Cap rows processed (smoke test).")
     args = parser.parse_args()
@@ -337,6 +420,9 @@ def main():
     tool_order = [t["function"]["name"] for t in tools]
     print(f"tools ({len(tools)}): {tool_order}")
 
+    system_prompt = build_system_prompt(args.system_prompt)
+    print(f"system prompt ({len(system_prompt)} chars): {system_prompt[:70]!r}...")
+
     stats = {
         "rows_in": 0,
         "rows_out": 0,
@@ -344,6 +430,8 @@ def main():
         "rows_dropped_multi_toolcall": 0,
         "rows_dropped_unparseable_args": 0,
         "rows_no_trailing_assistant": 0,
+        "rows_system_prompt_replaced": 0,
+        "rows_no_system_msg": 0,
         "trajectories_modified": 0,
         "dropped_args": Counter(),
         "coerced_bool_args": Counter(),
@@ -361,7 +449,7 @@ def main():
                 done = True
                 break
             stats["rows_in"] += 1
-            new_messages = transform_row(row["messages"], allowlist, stats)
+            new_messages = transform_row(row["messages"], allowlist, system_prompt, stats)
             if new_messages is None:
                 continue
             uuid = row.get("uuid", "")
@@ -402,6 +490,9 @@ def main():
         "rows_dropped_unparseable_args": stats["rows_dropped_unparseable_args"],
         "unparseable_arg_tools": dict(stats["unparseable_arg_tools"].most_common()),
         "rows_no_trailing_assistant_train_time_drop": stats["rows_no_trailing_assistant"],
+        "system_prompt_chars": len(system_prompt),
+        "rows_system_prompt_replaced": stats["rows_system_prompt_replaced"],
+        "rows_no_system_msg": stats["rows_no_system_msg"],
         "trajectories_modified": stats["trajectories_modified"],
         "args_stripped_by_key": dict(stats["dropped_args"].most_common()),
         "bool_args_coerced_by_key": dict(stats["coerced_bool_args"].most_common()),
@@ -420,6 +511,10 @@ def main():
         f"DROPPED unparseable tool-call args (trajectory loss): {report['rows_dropped_unparseable_args']} {report['unparseable_arg_tools']}"
     )
     print(f"would drop at train time (no trailing assistant): {report['rows_no_trailing_assistant_train_time_drop']}")
+    print(
+        f"SYSTEM PROMPT swapped to harness prompt ({report['system_prompt_chars']} chars) on "
+        f"{report['rows_system_prompt_replaced']} rows; rows with no system msg: {report['rows_no_system_msg']}"
+    )
     print(f"MODIFIED (kept) trajectories: {report['trajectories_modified']}")
     print(f"  args stripped by key: {report['args_stripped_by_key']}")
     print(f"  bool args coerced by key: {report['bool_args_coerced_by_key']}")
