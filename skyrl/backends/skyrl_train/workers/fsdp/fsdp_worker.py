@@ -98,7 +98,12 @@ class FSDPWeightExtractor(WeightExtractor):
             for name, param in params.items():
                 if name.endswith("mlp.experts.gate_up_proj"):
                     full = self._gather_tensor(param).to(dtype).detach()
+                    # Guard the hardcoded [E,2I,H] layout: fail LOUD if a future
+                    # transformers release changes the fused packing, rather than
+                    # syncing silently-wrong weights (the gibberish failure mode).
+                    assert full.ndim == 3, f"expected 3D fused {name}, got {tuple(full.shape)}"
                     E, twoI = full.shape[0], full.shape[1]
+                    assert twoI % 2 == 0, f"{name} dim1 must be 2*intermediate (even), got {twoI}"
                     I = twoI // 2
                     pre = name[: -len("gate_up_proj")]
                     for n in range(E):
@@ -112,6 +117,7 @@ class FSDPWeightExtractor(WeightExtractor):
                             )
                 elif name.endswith("mlp.experts.down_proj"):
                     full = self._gather_tensor(param).to(dtype).detach()
+                    assert full.ndim == 3, f"expected 3D fused {name}, got {tuple(full.shape)}"
                     E = full.shape[0]
                     pre = name[: -len("down_proj")]
                     for n in range(E):
@@ -154,6 +160,9 @@ class FSDPWeightExtractor(WeightExtractor):
             # Mirror extract_weights: split fused transformers>=5 MoE experts into
             # separate per-expert names/shapes.
             if nm.endswith("mlp.experts.gate_up_proj"):
+                assert param.ndim == 3 and param.shape[1] % 2 == 0, (
+                    f"expected 3D fused {nm} with even dim1, got {tuple(param.shape)}"
+                )
                 E, twoI, H = param.shape[0], param.shape[1], param.shape[2]
                 I = twoI // 2
                 pre = nm[: -len("gate_up_proj")]
@@ -163,6 +172,7 @@ class FSDPWeightExtractor(WeightExtractor):
                         dtype_names.append(dtype_name)
                         shapes.append([I, H])
             elif nm.endswith("mlp.experts.down_proj"):
+                assert param.ndim == 3, f"expected 3D fused {nm}, got {tuple(param.shape)}"
                 E, H, I = param.shape[0], param.shape[1], param.shape[2]
                 pre = nm[: -len("down_proj")]
                 for n in range(E):

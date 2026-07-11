@@ -76,7 +76,12 @@ def yield_module_grouped_chunks(
             # correctly; otherwise the fused names mis-map and the colocated engine
             # emits deterministic gibberish. No-op on transformers<5 (no fused key).
             if param_name.endswith("mlp.experts.gate_up_proj"):
+                # Guard the hardcoded [E,2I,H] layout: if a future transformers
+                # release changes the fused packing, fail LOUD here instead of
+                # syncing silently-wrong weights (the gibberish failure mode).
+                assert tensor.ndim == 3, f"expected 3D fused {param_name}, got {tuple(tensor.shape)}"
                 E, twoI = tensor.shape[0], tensor.shape[1]
+                assert twoI % 2 == 0, f"{param_name} dim1 must be 2*intermediate (even), got {twoI}"
                 I = twoI // 2
                 pre = param_name[: -len("gate_up_proj")]
                 for n in range(E):
@@ -89,6 +94,7 @@ def yield_module_grouped_chunks(
                         module_size += t.nbytes
                 continue
             if param_name.endswith("mlp.experts.down_proj"):
+                assert tensor.ndim == 3, f"expected 3D fused {param_name}, got {tuple(tensor.shape)}"
                 E = tensor.shape[0]
                 pre = param_name[: -len("down_proj")]
                 for n in range(E):
