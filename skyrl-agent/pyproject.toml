@@ -83,7 +83,9 @@ conflicts = [
 ]
 
 [tool.uv.sources]
-openhands-ai = { git = "https://github.com/NovaSky-AI/SkyRL-OpenHands.git", rev = "main" }
+# Mounted runtime (runtime_mode / bundle mount) lives only on this fork's branch;
+# NovaSky-AI@main lacks it. Required for the multi-env RL mounted-runtime path.
+openhands-ai = { git = "https://github.com/JianhongTu/SkyRL-OpenHands.git", rev = "feature/mounted-runtime-r2e" }
 tevatron = { git = "https://github.com/texttron/tevatron.git", rev = "main" }
 verl = { git = "https://github.com/NovaSky-AI/verl-fork", rev = "main" }
 # TODO (sumanthrh): Improve dependency management here. We should use the skyrl package from the local version of the repo.

@@ -144,8 +144,8 @@ fi
     megatron_config.moe_grouped_gemm=true \
     megatron_config.moe_router_load_balancing_type=$MOE_LB_TYPE \
     megatron_config.moe_aux_loss_coeff=$MOE_AUX_LOSS_COEFF \
-    megatron_config.ddp_config.overlap_grad_reduce=true \
-    megatron_config.ddp_config.overlap_param_gather=true \
+    megatron_config.ddp_config.overlap_grad_reduce=false \
+    megatron_config.ddp_config.overlap_param_gather=false \
     megatron_config.optimizer_config_kwargs.use_precision_aware_optimizer=true \
     megatron_config.optimizer_config_kwargs.exp_avg_dtype=bf16 \
     megatron_config.optimizer_config_kwargs.exp_avg_sq_dtype=bf16 \
@@ -165,6 +165,12 @@ fi
 #   OpenHands schemas so the prompt renders <tools>...</tools>, matching the rollout agent.
 # - train_on_what=all_assistant_messages: supervise every assistant turn's <think>+tool_call
 #   (the agent sees prior thinking at rollout). See filter_by_length.py for why length<32k.
+# - overlap_grad_reduce/overlap_param_gather are OFF (not the Megatron default true): with MoE
+#   expert parallelism a batch can route ZERO tokens to some expert, so that grad-reduce bucket's
+#   backward hook never fires and finalize_model_grads asserts "Communication call has not been
+#   issued for this bucket" -- data-dependent, so it survives many steps then crashes (seen at
+#   step 109). OFF makes finish_grad_sync issue every bucket's all-reduce synchronously. At DP=2
+#   the throughput cost is negligible. Do NOT re-enable for this MoE recipe.
 # - Saves HF snapshots to EXPORT_PATH/global_step_N every HF_SAVE_INTERVAL steps (loadable HF model
 #   for the RL/vLLM phase). ckpt_interval=0 + resume_from="" (no resumable dist-checkpoint: it hangs
 #   under Ray+EP; this matches every reference SkyRL Megatron SFT script). NOTE: with no checkpoint,

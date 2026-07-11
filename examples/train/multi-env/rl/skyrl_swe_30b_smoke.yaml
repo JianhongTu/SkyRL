@@ -1,0 +1,80 @@
+# =============================================================================
+# SkyRL-agent SWE task config for OUR RL phase.
+#
+# Adapted from skyrl-agent/examples/run_skyrl/skyrl_swe.yaml, with the tool set
+# ALIGNED to what we SFT'd on (examples/train/multi-env/sft). Our SFT trained the
+# model on exactly four OpenHands tools:
+#     execute_bash, think, finish, str_replace_editor
+# and the rollout agent's parser HARD-ERRORS on any tool it wasn't trained for
+# (see examples/train/multi-env/CLAUDE.md "Tool signature must be exact").
+#
+# Flag -> tool mapping (skyrl_agent/agents/oh_codeact/codeact_agent.py:66-71):
+#   enable_editor  -> str_replace_editor   (our SFT: YES)
+#   enable_think   -> think                (our SFT: YES)
+#   enable_search  -> search               (our SFT: NO  -> keep off)
+#   execute_bash + finish are always-on core CodeAct tools (no flag).
+#
+# The reference yaml had think=false / search=true, which is BACKWARDS for our
+# checkpoint; do not "restore" those without re-checking the SFT tool set.
+# =============================================================================
+agent_cls: skyrl_agent.agents.oh_codeact.OHCodeActAgent
+
+task: skyrl_agent.tasks.swebench.utils.SWEBenchTask
+
+tools:
+  enable_bash_tool: true       # execute_bash (core, trained)
+  enable_browsing: false
+  enable_llm_editor: false
+  enable_editor: true          # str_replace_editor (trained)
+  enable_jupyter: false
+  enable_cmd: true
+  enable_think: true           # think (trained)  <-- differs from reference (was false)
+  enable_finish: true          # finish (core, trained)
+  enable_mcp: false
+  enable_search: false         # NOT trained  <-- differs from reference (was true)
+
+data:
+  instance_key: instance
+  instance_id_key: instance.instance_id
+  data_source_key: data_source
+
+generator:
+  infer_backend: skyrl-train
+  backend_config: null
+  # SMOKE variant: small + at the PROVEN sampling temp. 2 traj/prompt (vs 8) and
+  # 20 iters (vs 50) keep the loop-validation cheap.
+  num_trajectories: 2
+  max_iterations: 20
+  max_prompt_length: 28000
+  sampling_params:
+    # temp 0.6 (NOT 1.0): at 1.0 this SFT init DEGENERATES — it rambles to the
+    # per-turn max-token cap emitting NO valid <tool_call> and no <|im_end|>, so
+    # every trajectory ends CONTEXT_WINDOW_EXCEEDED on turn 1 (stop_reason=length).
+    # temp 0.6 is what the 23% eval + the standalone rollout smoke used (clean
+    # multi-turn tool calls). See memory multi-env-sft-rollout-gap.
+    temperature: 0.6
+    top_p: 0.95
+    top_k: -1
+    max_tokens: 4000
+  val_config:
+    num_trajectories: 1
+    sampling_params:
+      temperature: 0.6
+      top_p: 0.95
+      max_tokens: 4000
+  remove_think_tokens: false
+  vision_is_active: false
+  # acc-thinking template: matches our SFT (World A / KEEP reasoning). See
+  # skyrl_agent/functional/templates/qwen3_acc_thinking.jinja2.
+  qwen3_enable_thinking: true
+  qwen3_acc_thinking: true
+
+dispatcher:
+  type: async_pipeline
+  scheduler: naive
+  # Sandbox-side rollout concurrency (bounded by the remote runtime, not GPUs).
+  max_parallel_agents: 96
+  max_eval_parallel_agents: 96
+  val_config:
+    max_parallel_agents: 32
+    max_eval_parallel_agents: 32

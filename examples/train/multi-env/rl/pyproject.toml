@@ -1,0 +1,83 @@
+# Our own project env for the multi-env RL rollout (smoke + real run), so we can
+# fix the RL dependency graph WITHOUT modifying skyrl-agent (kept as reference).
+#
+# What it fixes vs running `uv run` from the skyrl-agent dir:
+#   1. skyrl -> LOCAL path (parent repo). git main is stale and lacks symbols the
+#      local skyrl-agent imports (resolve_policy_model_name). [tool.uv.sources]
+#   2. environments pinned to linux/x86_64 so uv's universal resolve doesn't try
+#      the aarch64 split of the (unused) verl extra.
+#   3. we do NOT override vllm. verl's dead `vllm==0.8.5` pin (the original
+#      blocker) is excluded from the solve by [tool.uv] conflicts below (we
+#      install skyrl-train, not verl), so skyrl[fsdp] drives the coherent modern
+#      stack: vllm==0.23.0 / torch==2.11.0 / flash-attn==2.8.3. Overriding vllm to
+#      an older version forces an incompatible torch (2.7.0) and breaks resolve.
+#
+# Run:  cd examples/train/multi-env/rl && uv run --isolated python smoke_rollout.py
+
+[project]
+name = "multi-env-rl"
+version = "0.0.0"
+requires-python = "==3.12.*"
+dependencies = [
+  "skyrl-agent[skyrl-train]",
+]
+
+[tool.uv.sources]
+skyrl-agent  = { path = "/home/tovi/SkyRL/skyrl-agent", editable = true }
+skyrl        = { path = "/home/tovi/SkyRL", editable = true }
+# MOUNTED RUNTIME lives only on the feature/mounted-runtime-r2e fork (the one the
+# eval + runtime server + bundle run); NovaSky-AI@main lacks the SandboxConfig
+# `runtime_mode` field entirely. skyrl-agent pins @main -> no mounted mode.
+openhands-ai = { git = "https://github.com/JianhongTu/SkyRL-OpenHands.git", rev = "feature/mounted-runtime-r2e" }
+tevatron     = { git = "https://github.com/texttron/tevatron.git", rev = "main" }
+verl         = { git = "https://github.com/NovaSky-AI/verl-fork", rev = "main" }
+
+[tool.uv]
+environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
+# mirror skyrl-agent's overrides (they only apply when it's the root) + fix the
+# dead verl vllm pin so the resolve completes.
+override-dependencies = [
+  "ray==2.51.1",
+  # NB: do NOT pin xgrammar here. skyrl-agent's old stack pinned ==0.1.17, but
+  # modern vllm==0.23.0 requires xgrammar>=0.2.0 (imports `StructuralTag`, added in
+  # 0.2.x). override-dependencies BYPASS vllm's constraint, so pinning 0.1.17 silently
+  # installs it and vllm ImportErrors at engine start. Let vllm drive xgrammar.
+  "opentelemetry-api==1.26.0",
+  "opentelemetry-sdk==1.26.0",
+  "opentelemetry-exporter-otlp==1.26.0",
+  "opentelemetry-exporter-otlp-proto-grpc==1.26.0",
+  # openhands-ai 0.38.0 hard-pins protobuf<5.0, but the modern skyrl/vllm stack
+  # (vllm>=0.19 needs protobuf>=5.29.6) can't satisfy that. openhands's cap is
+  # stale/over-conservative (protobuf 4->5 is largely wire-compatible). Force a
+  # protobuf that satisfies vllm; if openhands breaks at runtime we bump it.
+  "protobuf>=5.29.6",
+  # Must stay on transformers v5 (NOT v4): SkyRL's FSDP backend calls the v5-only
+  # `named_non_persistent_buffers()` in init_model (v4 -> AttributeError at model
+  # init), and vLLM warns the v4 codepath is deprecated/being removed. But v5 stores
+  # Qwen3-MoE experts FUSED (`...mlp.experts.gate_up_proj` [E,2I,H]); SkyRL's FSDP
+  # policy ships those fused names verbatim on the FSDP->vLLM weight sync, and vLLM's
+  # Qwen3MoE.load_weights (wants SEPARATE per-expert names) mis-maps them -> the
+  # colocated engine emits deterministic gibberish. So we KEEP v5 and split fused->
+  # separate in SkyRL's weight extractor (see rl/apply_moe_patch2.py; not in the lock,
+  # must be re-applied after any venv rebuild).
+  # browsergym-visualwebarena (a browser-env dep we don't use for SWE) caps
+  # huggingface-hub<1.0, but transformers 5.x needs hf-hub>=1.5.0. Force the
+  # modern hf-hub; browsergym isn't exercised on the SWE path.
+  "huggingface-hub>=1.5.0",
+  # the mounted-openhands fork pins daytona-api-client==0.18.1 vs skyrl-agent's
+  # ==0.20.1 (a sandbox provider we don't use on the remote-runtime path). Force one.
+  "daytona-api-client==0.20.1",
+]
+conflicts = [
+  [
+    { package = "skyrl-agent", extra = "skyrl-train" },
+    { package = "skyrl-agent", extra = "verl" },
+    { package = "skyrl-agent", extra = "tinker" },
+  ],
+]
+
+[tool.uv.extra-build-dependencies]
+flash-attn = [{ requirement = "torch", match-runtime = true }]
+
+[tool.uv.extra-build-variables]
+flash-attn = { FLASH_ATTENTION_SKIP_CUDA_BUILD = "TRUE" }

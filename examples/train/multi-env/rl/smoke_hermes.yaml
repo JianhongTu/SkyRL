@@ -1,0 +1,79 @@
+# Standalone rollout smoke for HermesOHCodeActAgent (option B).
+#
+# Identical rollout code path as training (AutoAgentRunner.run -> CodeActTrajectory
+# -> run_controller -> agent.step()), but with the openai_server backend hitting a
+# served vLLM instead of the colocated skyrl-train engine. Validates the hermes
+# format fix (backend-agnostic): does the model emit clean <tool_call> and stop
+# looping, vs the <function>/escaped failure.
+#
+# Tool set is our SFT-aligned 4 tools (bash, think, finish, str_replace_editor;
+# search OFF) — same as rl/skyrl_swe_30b.yaml, NOT the demo yaml.
+
+agent_cls: skyrl_agent.agents.oh_codeact.OHCodeActAgent   # registry key only; the
+                                                          # smoke rebinds this to
+                                                          # HermesOHCodeActAgent
+
+task: skyrl_agent.tasks.swebench.utils.SWEBenchTask
+
+tools:
+  enable_bash_tool: true       # execute_bash (trained)
+  enable_browsing: false
+  enable_llm_editor: false
+  enable_editor: true          # str_replace_editor (trained)
+  enable_jupyter: false
+  enable_cmd: true
+  enable_think: true           # think (trained)
+  enable_finish: true          # finish (trained)
+  enable_mcp: false
+  enable_search: false         # NOT trained -> keep off
+
+data:
+  instance_key: instance
+  instance_id_key: instance.instance_id
+  data_source_key: data_source
+
+generator:
+  infer_backend: openai_server
+  backend_config:
+    # served vLLM: our SFT export. api_url has NO /v1 suffix (the backend appends
+    # /v1/completions). model_name must match --served-model-name on the server.
+    model_name: ${oc.env:SMOKE_MODEL_NAME,sft}
+    api_url: ${oc.env:SMOKE_API_URL,http://localhost:8010}
+    model_max_len: 32768
+  num_trajectories: 1
+  max_iterations: 50
+  # NOTE: the model is natively 32768 (max_position_embeddings), and the agent
+  # sends max_tokens = max_prompt_length - response_token_len. Since vLLM requires
+  # prompt + max_tokens <= max_model_len, max_prompt_length must leave room for the
+  # prompt (else 400 "maximum context length"). 24000 gives ~8k headroom.
+  # (Real RL at max_prompt_length=32768 + a 32768 engine hits the same wall —
+  #  needs a bigger-context engine, e.g. YaRN, or the same reduction.)
+  max_prompt_length: 24000
+  sampling_params:
+    # temp 0.6 = the eval's known-good setting (temp 0/0.2 looped even w/ hermes).
+    # A loop here would indicate a real format problem, not temp sensitivity.
+    temperature: 0.6
+    top_p: 0.95
+    top_k: -1
+    max_tokens: 32768
+  remove_think_tokens: false
+  vision_is_active: false
+  qwen3_enable_thinking: true
+  qwen3_acc_thinking: true
+  # we run the smoke with val_mode=True, so the runner reads generator.val_config
+  val_config:
+    num_trajectories: 1
+    sampling_params:
+      temperature: 0.6
+      top_p: 0.95
+      top_k: -1
+      max_tokens: 32768
+
+dispatcher:
+  type: async_pipeline
+  scheduler: naive
+  max_parallel_agents: 1
+  max_eval_parallel_agents: 1
+  val_config:
+    max_parallel_agents: 1
+    max_eval_parallel_agents: 1

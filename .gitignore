@@ -126,3 +126,7 @@ tx/tinker/alembic/__pycache__/
 
 # claude settings
 .claude/settings.json
+# multi-env RL: runtime rollout traces + session backup files (not source)
+examples/train/multi-env/rl/trace/
+examples/train/multi-env/rl/**/*.bak
+examples/train/multi-env/rl/*.bak
