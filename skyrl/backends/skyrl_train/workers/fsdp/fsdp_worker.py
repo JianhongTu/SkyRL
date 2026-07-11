@@ -88,15 +88,48 @@ class FSDPWeightExtractor(WeightExtractor):
             params = {f"{self.weight_prefix}{k}": v for k, v in params.items()}
 
         if not self.group_by_module:
-            # Simple path: yield one chunk per parameter
+            # Simple path: yield one chunk per parameter.
+            # transformers>=5 stores MoE experts FUSED/grouped (e.g. Qwen3-MoE
+            # experts.gate_up_proj [E,2I,H]; experts.down_proj [E,H,I]); vLLM's
+            # load_weights expects SEPARATE per-expert tensors. Split so the
+            # FSDP->vLLM sync maps correctly (see yield_module_grouped_chunks,
+            # which handles the group_by_module / CUDA-IPC path). No-op on
+            # transformers<5 (no fused key present).
             for name, param in params.items():
-                tensor = self._gather_tensor(param).to(dtype).detach().contiguous()
-                yield WeightChunk(
-                    names=[name],
-                    dtypes=[str(dtype)],
-                    shapes=[list(tensor.shape)],
-                    tensors=[tensor],
-                )
+                if name.endswith("mlp.experts.gate_up_proj"):
+                    full = self._gather_tensor(param).to(dtype).detach()
+                    E, twoI = full.shape[0], full.shape[1]
+                    I = twoI // 2
+                    pre = name[: -len("gate_up_proj")]
+                    for n in range(E):
+                        for part, sl in (("gate_proj", full[n, :I, :]), ("up_proj", full[n, I:, :])):
+                            t = sl.contiguous()
+                            yield WeightChunk(
+                                names=[f"{pre}{n}.{part}.weight"],
+                                dtypes=[str(dtype)],
+                                shapes=[list(t.shape)],
+                                tensors=[t],
+                            )
+                elif name.endswith("mlp.experts.down_proj"):
+                    full = self._gather_tensor(param).to(dtype).detach()
+                    E = full.shape[0]
+                    pre = name[: -len("down_proj")]
+                    for n in range(E):
+                        t = full[n].contiguous()
+                        yield WeightChunk(
+                            names=[f"{pre}{n}.down_proj.weight"],
+                            dtypes=[str(dtype)],
+                            shapes=[list(t.shape)],
+                            tensors=[t],
+                        )
+                else:
+                    tensor = self._gather_tensor(param).to(dtype).detach().contiguous()
+                    yield WeightChunk(
+                        names=[name],
+                        dtypes=[str(dtype)],
+                        shapes=[list(tensor.shape)],
+                        tensors=[tensor],
+                    )
         else:
             for chunk in yield_module_grouped_chunks(
                 params=params,
@@ -117,9 +150,29 @@ class FSDPWeightExtractor(WeightExtractor):
         shapes = []
         dtype_name = str(dtype).split(".")[-1]
         for name, param in self.model.state_dict().items():
-            names.append(f"{self.weight_prefix}{name}" if self.weight_prefix else name)
-            dtype_names.append(dtype_name)
-            shapes.append(list(param.shape))
+            nm = f"{self.weight_prefix}{name}" if self.weight_prefix else name
+            # Mirror extract_weights: split fused transformers>=5 MoE experts into
+            # separate per-expert names/shapes.
+            if nm.endswith("mlp.experts.gate_up_proj"):
+                E, twoI, H = param.shape[0], param.shape[1], param.shape[2]
+                I = twoI // 2
+                pre = nm[: -len("gate_up_proj")]
+                for n in range(E):
+                    for part in ("gate_proj", "up_proj"):
+                        names.append(f"{pre}{n}.{part}.weight")
+                        dtype_names.append(dtype_name)
+                        shapes.append([I, H])
+            elif nm.endswith("mlp.experts.down_proj"):
+                E, H, I = param.shape[0], param.shape[1], param.shape[2]
+                pre = nm[: -len("down_proj")]
+                for n in range(E):
+                    names.append(f"{pre}{n}.down_proj.weight")
+                    dtype_names.append(dtype_name)
+                    shapes.append([H, I])
+            else:
+                names.append(nm)
+                dtype_names.append(dtype_name)
+                shapes.append(list(param.shape))
         return {"names": names, "dtype_names": dtype_names, "shapes": shapes}
 
     def _gather_tensor(self, param: torch.Tensor) -> torch.Tensor:

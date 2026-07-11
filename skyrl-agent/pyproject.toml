@@ -88,8 +88,11 @@ conflicts = [
 openhands-ai = { git = "https://github.com/JianhongTu/SkyRL-OpenHands.git", rev = "feature/mounted-runtime-r2e" }
 tevatron = { git = "https://github.com/texttron/tevatron.git", rev = "main" }
 verl = { git = "https://github.com/NovaSky-AI/verl-fork", rev = "main" }
-# TODO (sumanthrh): Improve dependency management here. We should use the skyrl package from the local version of the repo.
-skyrl = { git = "https://github.com/NovaSky-AI/SkyRL", rev = "main" }
+# Use the LOCAL skyrl (this repo), editable — matches rl/pyproject.toml. This
+# repo is merged up to NovaSky main@af36dc04 + our MoE weight-sync fix, so the
+# install is our controlled source (not a moving upstream `rev=main`). Both
+# declarations must name the same path or uv reports conflicting sources.
+skyrl = { path = "/home/tovi/SkyRL", editable = true }
 
 [tool.uv.extra-build-dependencies]
 flash-attn = [{requirement = "torch", match-runtime = true}]

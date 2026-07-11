@@ -68,6 +68,37 @@ def yield_module_grouped_chunks(
             param = params[param_name]
             tensor = gather_tensor_fn(param)
             tensor = tensor.to(dtype).detach().contiguous()
+            # transformers>=5 stores MoE experts FUSED/grouped (e.g. Qwen3-MoE
+            # experts.gate_up_proj [E,2I,H]; experts.down_proj [E,H,I]), but vLLM's
+            # load_weights expects SEPARATE per-expert experts.{n}.gate_proj/up_proj/
+            # down_proj.weight (the on-disk HF checkpoint format it loads cleanly at
+            # init). Split the gathered full tensor here so the FSDP->vLLM sync maps
+            # correctly; otherwise the fused names mis-map and the colocated engine
+            # emits deterministic gibberish. No-op on transformers<5 (no fused key).
+            if param_name.endswith("mlp.experts.gate_up_proj"):
+                E, twoI = tensor.shape[0], tensor.shape[1]
+                I = twoI // 2
+                pre = param_name[: -len("gate_up_proj")]
+                for n in range(E):
+                    for part, sl in (("gate_proj", tensor[n, :I, :]), ("up_proj", tensor[n, I:, :])):
+                        t = sl.contiguous()
+                        module_tensors.append(t)
+                        module_names.append(f"{pre}{n}.{part}.weight")
+                        module_shapes.append(list(t.shape))
+                        module_dtypes.append(str(dtype))
+                        module_size += t.nbytes
+                continue
+            if param_name.endswith("mlp.experts.down_proj"):
+                E = tensor.shape[0]
+                pre = param_name[: -len("down_proj")]
+                for n in range(E):
+                    t = tensor[n].contiguous()
+                    module_tensors.append(t)
+                    module_names.append(f"{pre}{n}.down_proj.weight")
+                    module_shapes.append(list(t.shape))
+                    module_dtypes.append(str(dtype))
+                    module_size += t.nbytes
+                continue
             shape = get_shape_fn(param_name, param, tensor)
             module_tensors.append(tensor)
             module_names.append(param_name)
