@@ -1,6 +1,7 @@
 from typing import Any, Dict, Callable
 import pandas as pd
 import traceback
+import time
 
 from skyrl_agent.agents.oh_codeact.codeact_agent import OHCodeActAgent
 from skyrl_agent.dispatcher.async_utils import call_sync_from_async
@@ -152,6 +153,7 @@ class CodeActTrajectory(BaseTrajectory):
                 "error": str(e),
                 "finish": False,
                 "finish_reason": "error_initialization",
+                "transitions": getattr(self.agent, "transitions", []),
             }
 
             self.result = return_val
@@ -176,6 +178,7 @@ class CodeActTrajectory(BaseTrajectory):
         agent = self.agent
         runtime = agent.runtime
         state = None
+        rollout_started_at = time.monotonic()
 
         try:
             if not runtime:
@@ -214,6 +217,7 @@ class CodeActTrajectory(BaseTrajectory):
                     "error": state.last_error if state and state.last_error else None,
                     "finish": finish,
                     "finish_reason": finish_reason,
+                    "transitions": getattr(agent, "transitions", []),
                 }
             )
         except Exception as e:
@@ -234,12 +238,14 @@ class CodeActTrajectory(BaseTrajectory):
                     "error": str(e),
                     "finish": False,
                     "finish_reason": "error_runtime",
+                    "transitions": getattr(agent, "transitions", []),
                 }
             )
         finally:
             logger.info(f"Running cleanup for run agent task for instance {instance_id}, trajectory {trajectory_id}")
             self._cleanup_agent()
 
+        return_val["rollout_seconds"] = time.monotonic() - rollout_started_at
         self.result = return_val
 
     async def evaluate_trajectory(self) -> None:
@@ -252,6 +258,7 @@ class CodeActTrajectory(BaseTrajectory):
         instance_id = data["instance_id"] if data["instance_id"] else batch_id
         instance = pd.Series(data["instance"])
         data_source = data["data_source"]
+        evaluation_started_at = time.monotonic()
 
         try:
             # TODO: Why does "result" have a "results" entry? we should flatten
@@ -260,6 +267,11 @@ class CodeActTrajectory(BaseTrajectory):
                 raise Exception(f"No results found for instance {instance_id}, trajectory {trajectory_id}")
             if "reward" in results:
                 self.result["reward"] = results["reward"]
+                if results.get("finish_reason") is not None:
+                    self.result["finish_reason"] = results["finish_reason"]
+                self.result["eval_error"] = results.get("evaluation_error")
+                self.result["reward_evaluation_seconds"] = results.get("reward_evaluation_seconds")
+                self.result["evaluation_seconds"] = time.monotonic() - evaluation_started_at
                 return
 
             eval_results = await self.task.evaluate_result(instance, results, instance_id, trajectory_id, data_source)
@@ -273,6 +285,8 @@ class CodeActTrajectory(BaseTrajectory):
             self.result["reward"] = False
             self.result["eval_error"] = str(e)
             self.result["finish_reason"] = "error_evaluation" if "No git patch found" not in str(e) else "no_git_patch"
+
+        self.result["evaluation_seconds"] = time.monotonic() - evaluation_started_at
 
     def _cleanup_agent(self):
         try:

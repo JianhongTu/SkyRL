@@ -3,6 +3,7 @@
 from typing import Any, Dict, List, Optional
 from dataclasses import dataclass, field
 from functools import wraps
+import time
 
 # Type aliases for Transition
 Observation = Dict[str, Any]
@@ -74,12 +75,14 @@ def record_transition(func):
         observation = Observation(input_ids=kwargs.get("input_ids", []))
 
         # Call the original function (LLM generation)
+        started_at = time.monotonic()
         result = await func(self, *args, **kwargs)
+        generation_seconds = time.monotonic() - started_at
         response_str, meta_info = result
         print(f"response_str: {response_str}")
 
         # Extract action information
-        output_tokens = meta_info.get("output_tokens", [])
+        output_tokens = meta_info.get("output_tokens") or []
         logprobs = meta_info.get("logprobs", None)
 
         action = TokensWithLogprobs(
@@ -97,6 +100,9 @@ def record_transition(func):
             episode_done=False,  # Default, can be updated later
             metrics={
                 "finish_reason": meta_info.get("finish_reason"),
+                "generation_seconds": generation_seconds,
+                "input_token_count": len(observation.input_ids),
+                "output_token_count": len(output_tokens),
             },
         )
 

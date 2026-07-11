@@ -646,6 +646,23 @@ def filter_generator_output(output: GeneratorOutput, kept_indices: List[int]) ->
     if output.get("stop_reasons"):
         filtered["stop_reasons"] = [output["stop_reasons"][i] for i in kept_indices]
 
+    for key in ("task_rewards", "traj_idx", "is_last_episode"):
+        values = output.get(key)
+        if values is not None and len(values) == len(output["response_ids"]):
+            filtered[key] = [values[i] for i in kept_indices]
+
+    trajectory_records = output.get("trajectory_records")
+    if trajectory_records is not None:
+        if len(trajectory_records) == len(output["response_ids"]):
+            filtered["trajectory_records"] = [trajectory_records[i] for i in kept_indices]
+        elif filtered.get("traj_idx") is not None:
+            kept_traj_ids = set(filtered["traj_idx"])
+            filtered["trajectory_records"] = [
+                record
+                for record in trajectory_records
+                if f"{record.get('instance_id')}-traj{record.get('trajectory_id')}" in kept_traj_ids
+            ]
+
     return filtered
 
 

@@ -7,7 +7,7 @@ Usage:
     python parse_log.py <rollout.log> [max_iterations]
 
     <rollout.log>    the captured stdout of a collect_batch.py run
-    max_iterations   turn cap used for that run (default 30); trajectories that
+    max_iterations   turn cap used for that run (default 50); trajectories that
                      reach it are the ones the trainer masks out
 """
 import re, json, sys, statistics as st
@@ -16,7 +16,7 @@ from collections import Counter, defaultdict
 if len(sys.argv) < 2:
     sys.exit("usage: python parse_log.py <rollout.log> [max_iterations]")
 LOG = sys.argv[1]
-CAP = int(sys.argv[2]) if len(sys.argv) > 2 else 30
+CAP = int(sys.argv[2]) if len(sys.argv) > 2 else 50
 raw = open(LOG, errors="replace").read()
 print(f"log chars: {len(raw):,}  (cap={CAP})")
 

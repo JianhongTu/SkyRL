@@ -1016,6 +1016,10 @@ class RayPPOTrainer:
                 uid for uid, is_last_step in zip(metrics_output_uids, metrics_output["is_last_step"]) if is_last_step
             ]
 
+        if generator_output_for_metrics.get("task_rewards") is not None:
+            generator_output_for_metrics = dict(generator_output_for_metrics)
+            generator_output_for_metrics["rewards"] = generator_output_for_metrics["task_rewards"]
+
         # only use `generator_output_for_metrics` for metrics calculation
         # For step-wise training, we only calculate metrics for the last step of each trajectory
         overall_metrics = get_metrics_from_generator_output(

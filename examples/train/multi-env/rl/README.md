@@ -15,29 +15,30 @@ harness. Details in `diagnostics/` (below).
 ## Open issues (prioritized)
 
 **P0 — training signal (decides whether RL learns at all)**
-- Most trajectories are **loss-masked out** (they hit the turn cap) → ≈0 gradient; even
-  *solved* trajectories are discarded. Revisit the mask-out policy.
-- The model **almost never emits `finish`**, so it runs to the turn cap. And when it does,
-  the trainer's finish check doesn't recognize the hermes finish call → also masked. **[4]**
+- Turn-cap trajectories are now trainable; only infrastructure/runtime, evaluation, malformed-response,
+  loop, and command-timeout failures are masked. Re-measure effective gradient coverage.
+- Finish recognition accepts Hermes and legacy syntax, and a valid training rollout receives a small
+  `+0.05` finish bonus. Re-measure whether this improves termination without premature submission. **[4]**
 - **GRPO groups collapse** when a prompt's samples fail to start (sandbox failures cluster
-  per prompt) → degenerate/undefined advantage; re-sample or drop such prompts.
+  per prompt) → exactly zero RLOO advantage. Use the structured group report to decide whether
+  dynamic filtering/resampling is affordable.
 
 **P1 — rollout infra & capacity**
 - Sandbox runtime **saturates far below** the configured concurrency (cold starts +
   capacity). Some base images are cached; finish caching the rest, **apply crun**, and
   **measure the real sustainable concurrency**. **[1] [2]**
-- **Reward-eval reliability at batch scale** — confirm reward is computed inline (before
-  sandbox teardown) and holds under concurrency.
+- **Reward-eval reliability at batch scale** — R2E reward runs inline before sandbox teardown,
+  and incomplete test commands are now classified as evaluation errors; validate under concurrency.
 
 **P1 — model behavior (wastes the turn budget → feeds P0)**
-- **Blocking foreground commands** hang turns (agent waits out timeouts).
-- **Reasoning spirals** — over-thinks to the token cap without acting.
-- **Workspace-path mismatch** — probes the SFT path, not the runtime path; wastes a turn.
+- **Blocking foreground commands** — the task now instructs backgrounding/interruption; measure whether
+  a shorter enforced command timeout is still needed.
+- **Reasoning spirals** — per-turn generation is now truly capped at 4K; re-measure before lowering it.
+- **Workspace-path mismatch** — R2E now exposes the learned `/workspace/...` path as an alias to `/testbed`.
 
 **P2 — config & tuning**
-- **Temperature** — pick a value for healthy reward entropy **and** confirm it actually
-  reaches the rollout sampler (task-config vs launcher layering). **[3]**
-- **Reward shaping** to encourage a `finish` call (paired with the finish-detection fix). **[4]**
+- **Temperature** — launcher sampling now reaches the rollout sampler and defaults to `0.6/0.95`;
+  use the corrected group report before tuning. **[3]**
 - **Fit check** — confirm FSDP + colocated vLLM memory fits the 8×H200 node at the target
   batch/context. **[5]**
 
@@ -52,9 +53,13 @@ _(Bracketed tags map to the original issue list 1–5.)_
 Environment is **locked**: env pins in `pyproject.toml` / `uv.lock`; the MoE weight-sync fix
 lives in the skyrl source and is installed editable, so it needs no re-applying.
 
+Hermes rollouts now record exact sampled input/output token IDs; training no longer reconstructs
+them through the generic message-template fallback. Structured records include task and shaped
+rewards, finish bonus, mask status, token counts, stop reasons, and generation/evaluation timing.
+
 `diagnostics/` holds the dry-run harness:
-- `collect_batch.py` + `collect_batch.yaml` — run the 32×8 rollout batch against a served
-  vLLM (hermes agent = real RL config), dump per-trajectory rewards/metrics.
+- `collect_batch.py` — derive the real task config, reproduce the seeded first 32×8
+  rollout batch against a served vLLM, and dump structured trajectory/RLOO metrics.
 - `parse_log.py` — summarize the rollout log into the symptoms above (end-reason, turn-length,
   finish rate, sandbox-failure counts).
 

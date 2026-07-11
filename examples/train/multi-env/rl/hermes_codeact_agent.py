@@ -58,8 +58,10 @@ from openhands.events.event import Event
 from openhands.memory.condenser.condenser import Condensation, View
 
 from skyrl_agent.agents.oh_codeact.codeact_agent import OHCodeActAgent
+from skyrl_agent.agents.rollout_diagnostic_utils import bounded_max_tokens
 from skyrl_agent.dispatcher.async_utils import call_async_from_sync
 from skyrl_agent.functional.function_calling import convert_str_to_completion_format
+from skyrl_agent.functional.utils import record_transition
 
 # Training-matching acc-thinking template (byte copy from skyrl/train), shipped
 # next to this file so the rollout prompt is byte-faithful to the SFT.
@@ -71,6 +73,15 @@ _HERMES_TOOL_CALL_RE = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.
 
 class HermesOHCodeActAgent(OHCodeActAgent):
     """OHCodeActAgent variant that prompts and parses in Qwen hermes format."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.transitions = []
+
+    @record_transition
+    async def _generate(self, **kwargs):
+        """Generate once while preserving the exact sampled input/output token IDs."""
+        return await self.infer_engine.async_generate_ids(**kwargs)
 
     # ------------------------------------------------------------------ prompt
     def _encode_prompt(self, messages):
@@ -191,10 +202,14 @@ class HermesOHCodeActAgent(OHCodeActAgent):
                 return AgentFinishAction(thought="CONTEXT_WINDOW_EXCEEDED")
 
             sampling_params = copy.deepcopy(self.sampling_params)
-            sampling_params["max_tokens"] = self.max_prompt_length - self.response_token_len
+            remaining_tokens = self.max_prompt_length - self.response_token_len
+            sampling_params["max_tokens"] = bounded_max_tokens(
+                configured=sampling_params.get("max_tokens", remaining_tokens),
+                remaining=remaining_tokens,
+            )
 
             response_str, meta_info = call_async_from_sync(
-                self.infer_engine.async_generate_ids,
+                self._generate,
                 input_ids=input_ids,
                 sampling_params=sampling_params,
                 request_id=self.agent_id,

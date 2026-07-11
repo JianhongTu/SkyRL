@@ -37,6 +37,7 @@ class GeneratorOutput(TypedDict):
     prompt_token_ids: List[List[int]]
     response_ids: List[List[int]]
     rewards: Union[List[float], List[List[float]]]
+    task_rewards: Optional[Union[List[float], List[List[float]]]]
     loss_masks: List[List[int]]
     stop_reasons: Optional[List[str]]
     rollout_metrics: Optional[Dict[str, Any]]
@@ -46,6 +47,7 @@ class GeneratorOutput(TypedDict):
     # trajectory in the input batch (i.e. per ``agent_loop`` call). Used by the fully
     # async trainer to compute per-group / intra-group completion-time metrics.
     trajectory_generation_times: Optional[List[float]]
+    trajectory_records: Optional[List[Dict[str, Any]]]
     rollout_expert_indices: Optional[List[List[List[List[int]]]]]  # [batch_size, seq_len, layer_num, topk]
     # Applicable only for step-wise training
     is_last_step: Optional[List[bool]]

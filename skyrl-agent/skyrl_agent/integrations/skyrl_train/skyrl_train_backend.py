@@ -46,7 +46,9 @@ class SkyRLGeneratorOutput(GeneratorOutput):
 
         # Add more skyrl-specific rollout metrics.
         assert "rollout_metrics" in result, "rollout_metrics should be in the result"
-        skyrl_rollout_metrics = get_rollout_metrics(result["response_ids"], result["rewards"])
+        skyrl_rollout_metrics = get_rollout_metrics(
+            result["response_ids"], result.get("task_rewards", result["rewards"])
+        )
         result["rollout_metrics"].update(skyrl_rollout_metrics)
         self.result = result
 

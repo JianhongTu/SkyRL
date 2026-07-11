@@ -7,6 +7,7 @@ import tempfile
 import time
 import re
 import asyncio
+import shlex
 
 from openhands.core.main import create_runtime
 from openhands.utils.shutdown_listener import sleep_if_should_continue
@@ -68,6 +69,13 @@ def _get_swebench_workspace_dir_name(instance: pd.Series, dataset: str) -> str:
     if "r2e-gym" in dataset:
         return "/testbed"
     return "/workspace/" + f'{instance.repo}__{getattr(instance, "version", "null")}'.replace("/", "__")
+
+
+def _get_legacy_workspace_dir_name(instance: pd.Series) -> str:
+    version = getattr(instance, "version", "null")
+    if pd.isna(version):
+        version = "null"
+    return "/workspace/" + f"{instance.repo}__{version}".replace("/", "__")
 
 
 # def get_instruction(instance: pd.Series):
@@ -259,6 +267,18 @@ def initialize_runtime(runtime: Runtime, instance: pd.Series, dataset: str):
             obs.exit_code == 0,
             f"Failed to source /swe_util/instance_r2e_entry.sh: {str(obs)}",
         )
+        legacy_workspace = _get_legacy_workspace_dir_name(instance)
+        action = CmdRunAction(
+            command=(
+                f"mkdir -p {shlex.quote(os.path.dirname(legacy_workspace))} && "
+                f"ln -sfn /testbed {shlex.quote(legacy_workspace)}"
+            )
+        )
+        action.set_hard_timeout(600)
+        logger.info(action, extra={"msg_type": "ACTION"})
+        obs = runtime.run_action(action)
+        logger.info(obs, extra={"msg_type": "OBSERVATION"})
+        assert_and_raise(obs.exit_code == 0, f"Failed to create legacy workspace alias: {str(obs)}")
     else:
         action = CmdRunAction(command="source /swe_util/instance_swe_entry.sh")
         action.set_hard_timeout(600)
@@ -364,6 +384,10 @@ class SWEBenchTask(BaseTask):
     </uploaded_files>
 
     I've uploaded a python code repository in the directory {workspace_dir_name}. Consider the following issue description:
+
+    Your shell already starts in {workspace_dir_name}. Work there directly and do not search for another checkout.
+    Run potentially long commands in the background. If a foreground command is still running, interrupt it with
+    execute_bash(is_input=true, command="C-c") instead of waiting through repeated turns.
 
     <issue_description>
     {instance.problem_statement}
@@ -572,11 +596,21 @@ class SWEBenchTask(BaseTask):
 
         # r2e directly run the tests
         if "r2e-gym" in dataset:
+            reward_evaluation_started_at = time.monotonic()
             action = CmdRunAction(command="bash /root/run_tests.sh")
             action.set_hard_timeout(600)
             logger.info(action, extra={"msg_type": "ACTION"})
             obs = runtime.run_action(action)
+            reward_evaluation_seconds = time.monotonic() - reward_evaluation_started_at
             logger.info(obs, extra={"msg_type": "OBSERVATION"})
+            if isinstance(obs, CmdOutputObservation) and obs.exit_code == -1:
+                logger.error("R2E reward evaluation did not finish before its hard timeout")
+                return {
+                    "reward": 0,
+                    "finish_reason": "error_evaluation",
+                    "evaluation_error": "run_tests_timeout",
+                    "reward_evaluation_seconds": reward_evaluation_seconds,
+                }
             if isinstance(obs, CmdOutputObservation):
                 test_output = obs.content
                 output = re.sub(r"\x1b\[[0-9;]*m|\r", "", test_output)
@@ -585,10 +619,18 @@ class SWEBenchTask(BaseTask):
 
                 results = parse_log_pytest(output)
                 reward = get_reward(results, instance)
-                return {"reward": reward}
+                return {
+                    "reward": reward,
+                    "reward_evaluation_seconds": reward_evaluation_seconds,
+                }
             else:
                 logger.info(f"Running bash /root/run_tests.sh, but got unexpected observation type: {str(obs)}")
-                return {"reward": 0, "finish_reason": "error_evaluation"}
+                return {
+                    "reward": 0,
+                    "finish_reason": "error_evaluation",
+                    "evaluation_error": "unexpected_run_tests_observation",
+                    "reward_evaluation_seconds": reward_evaluation_seconds,
+                }
 
         action = CmdRunAction(command='git config --global core.pager ""')
         action.set_hard_timeout(600)

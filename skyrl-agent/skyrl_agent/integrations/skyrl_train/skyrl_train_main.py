@@ -38,7 +38,11 @@ class SkyRLAgentGenerator(GeneratorInterface):
 
     async def generate(self, input_batch: GeneratorInput) -> GeneratorOutput:
         val_mode = input_batch["batch_metadata"].training_phase == "eval"
-        return await self.agent_generator.run(input_batch, val_mode=val_mode)
+        return await self.agent_generator.run(
+            input_batch,
+            val_mode=val_mode,
+            sampling_params=input_batch.get("sampling_params"),
+        )
 
 
 class SkyRLAgentPPOExp(BasePPOExp):

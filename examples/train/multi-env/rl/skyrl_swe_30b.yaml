@@ -51,16 +51,31 @@ generator:
   # bigger-context engine (YaRN); do not set them back to 32768.
   max_prompt_length: 28000
   sampling_params:
-    temperature: 1
-    top_p: 1
+    min_tokens: 1
+    skip_special_tokens: true
+    include_stop_str_in_output: true
+    temperature: 0.6
+    top_p: 0.95
+    min_p: 0.0
     top_k: -1
     max_tokens: 4000
+    repetition_penalty: 1.0
+    logprobs: 1
+    stop: null
   val_config:
     num_trajectories: 1
     sampling_params:
-      temperature: 0
+      min_tokens: 1
+      skip_special_tokens: true
+      include_stop_str_in_output: true
+      temperature: 0.6
       top_p: 0.95
+      min_p: 0.0
+      top_k: -1
       max_tokens: 4000
+      repetition_penalty: 1.0
+      logprobs: 1
+      stop: null
   remove_think_tokens: false
   vision_is_active: false
   # acc-thinking template: matches our SFT (World A / KEEP reasoning). See

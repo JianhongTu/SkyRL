@@ -11,17 +11,22 @@ from loguru import logger
 import os
 import aiohttp
 
+from skyrl_agent.agents.rollout_diagnostic_utils import extract_exact_output_tokens
+
 
 class OpenAIBackendConfig(TypedDict):
     model_name: str
     api_url: str
+    require_token_ids: bool
 
 
 class OpenAIBackend(AsyncInferBackend):
-    def __init__(self, infer_engine: Any, cfg: OpenAIBackendConfig):
+    def __init__(self, infer_engine: Any, cfg: OpenAIBackendConfig, tokenizer: Any = None):
         assert os.environ.get("OPENAI_API_KEY") is not None, "OPENAI_API_KEY is not set"
         self.model_name = cfg["model_name"]
         self.api_url = cfg["api_url"]
+        self.tokenizer = tokenizer
+        self.require_token_ids = cfg.get("require_token_ids", False)
         try:
             self.model_max_len = cfg["model_max_len"]
         except omegaconf.errors.ConfigKeyError:
@@ -60,6 +65,8 @@ class OpenAIBackend(AsyncInferBackend):
                 sampling_params = dict(sampling_params)
             payload = sampling_params.copy()
             payload["model"] = self.model_name
+            if self.require_token_ids:
+                payload["return_token_ids"] = True
             # payload["max_tokens"] = self.model_max_len - len(input_ids) - 1
             print(f"max tokens: {payload['max_tokens']}")
 
@@ -67,13 +74,21 @@ class OpenAIBackend(AsyncInferBackend):
             output = await session.post(f"{self.api_url}/v1/completions", json=payload, headers=headers)
             output = await output.json()
 
+        choice = output["choices"][0]
+        response_text = choice["text"]
+        if self.require_token_ids:
+            output_tokens = extract_exact_output_tokens(choice)
+        else:
+            output_tokens = choice.get("token_ids")
+            if output_tokens is None:
+                output_tokens = self.tokenizer.encode(response_text, add_special_tokens=False) if self.tokenizer else []
         meta_info = {
-            "output_tokens": None,
-            "finish_reason": output["choices"][0]["finish_reason"],
+            "output_tokens": output_tokens,
+            "finish_reason": choice["finish_reason"],
             "logprobs": None,
         }
 
-        return output["choices"][0]["text"], meta_info
+        return response_text, meta_info
 
 
 class OpenAIGeneratorOutput(GeneratorOutput):
