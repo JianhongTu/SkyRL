@@ -730,6 +730,23 @@ def test_postprocess_keeps_cap_signal_and_separates_finish_bonus():
         "CONTEXT_WINDOW_EXCEEDED"
     )
 
+    legacy_runner = SimpleNamespace(
+        cfg=SimpleNamespace(
+            generator=SimpleNamespace(
+                num_trajectories=1,
+                val_config=SimpleNamespace(num_trajectories=1),
+                max_prompt_length=10,
+                remove_think_tokens=False,
+            )
+        ),
+        trajectories={"issue": {0: SimpleNamespace(result=legacy_error_result)}},
+        batch=runner.batch,
+        _get_data=runner._get_data,
+        tokenizer=Tokenizer(),
+    )
+    legacy_output = namespace["_post_process_results"](legacy_runner, val_mode=False)
+    assert legacy_output["rollout_logprobs"] is None
+
     budget_result = {
         "instance_id": "issue",
         "trajectory_id": 0,

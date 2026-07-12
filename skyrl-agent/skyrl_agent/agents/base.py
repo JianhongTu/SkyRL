@@ -710,7 +710,14 @@ class AgentRunner:
             "is_last_episode": is_last_episode_list,
             "traj_idx": traj_idx_list,
             "stop_reasons": [None] * len(prompt_input_ids),
-            "rollout_logprobs": logprobs,
+            "rollout_logprobs": (
+                None
+                if all(
+                    logprob is None or all(value is None for value in logprob)
+                    for logprob in logprobs
+                )
+                else logprobs
+            ),
             "rollout_metrics": rollout_metrics,
             "trajectory_records": trajectory_records,
         }
