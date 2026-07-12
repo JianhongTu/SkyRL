@@ -27,6 +27,15 @@
 # =============================================================================
 set -x
 
+# The async OpenHands runner holds many sockets/files per trajectory. The host
+# container defaults to a 1024 soft limit, which failed even at 32 agents during
+# diagnosis; its hard limit is 524288.
+NOFILE_LIMIT=${NOFILE_LIMIT:-524288}
+if ! ulimit -n "$NOFILE_LIMIT"; then
+  echo "ERROR: could not raise open-file limit to $NOFILE_LIMIT." >&2
+  exit 1
+fi
+
 REPO=${REPO:-/home/tovi/SkyRL}
 SKYRL_AGENT_DIR="$REPO/skyrl-agent"
 RL_DIR="$REPO/examples/train/multi-env/rl"
@@ -132,8 +141,16 @@ for _d in "$CKPT_DIR" "$EXPORT_DIR"; do
        echo "       the root/EBS drive. Set CKPT_DIR/EXPORT_DIR under /data/tovi." >&2
        exit 1 ;;
   esac
+  if ! mkdir -p "$_d"; then
+    echo "ERROR: could not create output directory: $_d" >&2
+    exit 1
+  fi
+  if ! _write_probe=$(mktemp "$_d/.skyrl-write-test.XXXXXX"); then
+    echo "ERROR: output directory is not writable: $_d" >&2
+    exit 1
+  fi
+  rm -f "$_write_probe"
 done
-mkdir -p "$CKPT_DIR" "$EXPORT_DIR"
 
 cd "$RL_DIR"
 

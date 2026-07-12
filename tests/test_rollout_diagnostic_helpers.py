@@ -35,6 +35,38 @@ def test_multi_env_rl_uses_native_context_window_split():
     assert "generator.eval_sampling_params.max_generate_length=2048" in launcher
 
 
+def test_rl_recipe_enforces_validated_runtime_limits():
+    task_config = (
+        ROOT / "examples/train/multi-env/rl/skyrl_swe_30b.yaml"
+    ).read_text()
+    assert re.search(r"^  max_parallel_agents: 32$", task_config, re.MULTILINE)
+    assert re.search(r"^  max_eval_parallel_agents: 32$", task_config, re.MULTILINE)
+
+    launcher = (
+        ROOT / "examples/train/multi-env/rl/run_skyrl_swe_30b.sh"
+    ).read_text()
+    assert "NOFILE_LIMIT=${NOFILE_LIMIT:-524288}" in launcher
+    assert 'ulimit -n "$NOFILE_LIMIT"' in launcher
+    assert 'mktemp "$_d/.skyrl-write-test.XXXXXX"' in launcher
+    assert "BATCH_SIZE=${BATCH_SIZE:-32}" in launcher
+    assert "EVAL_INTERVAL=${EVAL_INTERVAL:-10}" in launcher
+    assert "CKPT_INTERVAL=${CKPT_INTERVAL:-20}" in launcher
+
+    smoke_launcher = (
+        ROOT / "examples/train/multi-env/rl/run_skyrl_swe_30b_smoke.sh"
+    ).read_text()
+    assert "BATCH_SIZE=${BATCH_SIZE:-8}" in smoke_launcher
+    assert "MAX_TRAINING_STEPS=${MAX_TRAINING_STEPS:-2}" in smoke_launcher
+    assert "EVAL_INTERVAL=${EVAL_INTERVAL:-9999}" in smoke_launcher
+    assert "CKPT_INTERVAL=${CKPT_INTERVAL:-1}" in smoke_launcher
+    assert 'trainer.max_training_steps="$MAX_TRAINING_STEPS"' in smoke_launcher
+
+    entrypoint = (
+        ROOT / "examples/train/multi-env/rl/rl_train_entry.py"
+    ).read_text()
+    assert '"/opt/openhands-runtime/current"' in entrypoint
+
+
 def test_diagnostic_parser_describes_iteration_cap_as_trainable():
     source = (
         ROOT / "examples/train/multi-env/rl/diagnostics/parse_log.py"

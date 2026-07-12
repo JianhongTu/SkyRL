@@ -40,7 +40,7 @@ def _swe_mounted_sbcfg():
     cfg.runtime_mode = "mounted"
     cfg.runtime_bundle_host_path = os.environ.get(
         "SANDBOX_RUNTIME_BUNDLE_HOST_PATH",
-        "/home/ec2-user/tovi/openhands-runtime-bundles/d3c99cd",
+        "/opt/openhands-runtime/current",
     )
     cfg.runtime_bundle_container_path = "/opt/openhands-runtime"
     print(

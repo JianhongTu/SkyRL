@@ -86,9 +86,11 @@ generator:
 dispatcher:
   type: async_pipeline
   scheduler: naive
-  # Sandbox-side rollout concurrency (bounded by the remote runtime, not GPUs).
-  max_parallel_agents: 96
-  max_eval_parallel_agents: 96
+  # Validated against the remote runtime. At 96, runtime initialization was
+  # unstable; 32 with the raised nofile limit completed without descriptor or
+  # runtime-service instability.
+  max_parallel_agents: 32
+  max_eval_parallel_agents: 32
   val_config:
     max_parallel_agents: 32
     max_eval_parallel_agents: 32
