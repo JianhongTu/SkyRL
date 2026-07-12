@@ -17,7 +17,7 @@
 # The reference yaml had think=false / search=true, which is BACKWARDS for our
 # checkpoint; do not "restore" those without re-checking the SFT tool set.
 # =============================================================================
-agent_cls: skyrl_agent.agents.oh_codeact.OHCodeActAgent
+agent_cls: hermes_codeact_agent.HermesOHCodeActAgent
 
 task: skyrl_agent.tasks.swebench.utils.SWEBenchTask
 

@@ -25,7 +25,7 @@
 #   DATA_DIR=/home/tovi/data/r2e-all MODEL=/home/tovi/exports/sft_final \
 #     bash examples/train/multi-env/rl/run_skyrl_swe_30b.sh
 # =============================================================================
-set -x
+set -euo pipefail
 
 # The async OpenHands runner holds many sockets/files per trajectory. The host
 # container defaults to a 1024 soft limit, which failed even at 32 agents during
@@ -77,6 +77,14 @@ MAX_CKPTS=${MAX_CKPTS:-1}
 
 # --- our tool-aligned task config ---------------------------------------------
 TASK_YAML=${TASK_YAML:-$REPO/examples/train/multi-env/rl/skyrl_swe_30b.yaml}
+
+# These must be inherited by the Ray rollout worker, where the agent and remote
+# sandbox are actually constructed.
+export PYTHONPATH="$RL_DIR${PYTHONPATH:+:$PYTHONPATH}"
+export SKYRL_PYTHONPATH_EXPORT=${SKYRL_PYTHONPATH_EXPORT:-1}
+export SANDBOX_RUNTIME_MODE=${SANDBOX_RUNTIME_MODE:-mounted}
+export SANDBOX_RUNTIME_BUNDLE_HOST_PATH=${SANDBOX_RUNTIME_BUNDLE_HOST_PATH:-/opt/openhands-runtime/current}
+export SANDBOX_RUNTIME_BUNDLE_CONTAINER_PATH=${SANDBOX_RUNTIME_BUNDLE_CONTAINER_PATH:-/opt/openhands-runtime}
 
 # --- single-node (8xH200) sizing ----------------------------------------------
 NNODES=${NNODES:-1}
@@ -184,7 +192,7 @@ fi
   trainer.algorithm.advantage_estimator="loop" \
   trainer.policy.model.path="$MODEL" \
   trainer.placement.colocate_all=true \
-  trainer.strategy=fsdp2 \
+  trainer.strategy=fsdp \
   trainer.placement.policy_num_gpus_per_node=$NUM_GPUS \
   trainer.placement.ref_num_gpus_per_node=$NUM_GPUS \
   generator.inference_engine.num_engines=$NUM_INFERENCE_ENGINES \

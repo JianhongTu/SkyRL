@@ -321,21 +321,3 @@ class HermesOHCodeActAgent(OHCodeActAgent):
 
 
 Agent.register("HermesOHCodeActAgent", HermesOHCodeActAgent)
-
-
-# --------------------------------------------------------------------------
-# Activation (no edit to skyrl-agent, config agent_cls unchanged)
-# --------------------------------------------------------------------------
-# `agent_cls` in the yaml is only a REGISTRY KEY (skyrl_agent/agents/mapping.py);
-# it is never import_module'd. The trajectory that actually builds the agent,
-# CodeActTrajectory.initialize_trajectory(), HARDCODES `OHCodeActAgent(...)`
-# (skyrl_agent/agents/oh_codeact/codeact_runner.py). Rebinding that module-level
-# name here makes the reference trajectory instantiate OUR hermes subclass
-# instead — leaving skyrl-agent's source and the registries untouched.
-#
-# REQUIREMENT: this module must be imported in the ROLLOUT process (and, under
-# Ray, on the rollout workers) BEFORE trajectories are created. See the RL run
-# script for the import hook.
-import skyrl_agent.agents.oh_codeact.codeact_runner as _codeact_runner  # noqa: E402
-
-_codeact_runner.OHCodeActAgent = HermesOHCodeActAgent

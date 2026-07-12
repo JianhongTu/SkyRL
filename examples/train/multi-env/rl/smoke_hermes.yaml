@@ -9,9 +9,7 @@
 # Tool set is our SFT-aligned 4 tools (bash, think, finish, str_replace_editor;
 # search OFF) — same as rl/skyrl_swe_30b.yaml, NOT the demo yaml.
 
-agent_cls: skyrl_agent.agents.oh_codeact.OHCodeActAgent   # registry key only; the
-                                                          # smoke rebinds this to
-                                                          # HermesOHCodeActAgent
+agent_cls: hermes_codeact_agent.HermesOHCodeActAgent
 
 task: skyrl_agent.tasks.swebench.utils.SWEBenchTask
 

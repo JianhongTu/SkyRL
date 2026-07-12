@@ -970,7 +970,7 @@ def get_instance_docker_image(instance, data_source) -> str:
 
 # Helper function for sandbox config
 def get_default_sandbox_config_for_eval():
-    return SandboxConfig(
+    config = SandboxConfig(
         use_host_network=False,
         timeout=300,
         api_key=os.environ.get("ALLHANDS_API_KEY", None),
@@ -981,6 +981,20 @@ def get_default_sandbox_config_for_eval():
         remote_runtime_enable_retries=True,
         remote_runtime_class="sysbox",
     )
+    runtime_mode = os.environ.get("SANDBOX_RUNTIME_MODE")
+    if runtime_mode:
+        config.runtime_mode = runtime_mode
+    if runtime_mode == "mounted":
+        runtime_bundle_host_path = os.environ.get("SANDBOX_RUNTIME_BUNDLE_HOST_PATH")
+        if not runtime_bundle_host_path:
+            raise ValueError(
+                "SANDBOX_RUNTIME_BUNDLE_HOST_PATH must be set when SANDBOX_RUNTIME_MODE=mounted"
+            )
+        config.runtime_bundle_host_path = runtime_bundle_host_path
+        config.runtime_bundle_container_path = os.environ.get(
+            "SANDBOX_RUNTIME_BUNDLE_CONTAINER_PATH", "/opt/openhands-runtime"
+        )
+    return config
 
 
 def remove_binary_diffs(patch_text):

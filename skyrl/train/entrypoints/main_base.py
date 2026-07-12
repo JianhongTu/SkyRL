@@ -227,7 +227,13 @@ class BasePPOExp:
 
         if is_colocated:
             # Callers must invoke get_inference_client() from a sync context (no running event loop).
-            asyncio.run(client.sleep())
+            async def sleep_inference_client():
+                try:
+                    await client.sleep()
+                finally:
+                    await client.aclose()
+
+            asyncio.run(sleep_inference_client())
             logger.info("HTTP Inference: Colocated mode - slept inference engines after startup")
 
         return client

@@ -766,7 +766,10 @@ def validate_generator_output(num_prompts: int, generator_output: GeneratorOutpu
                 f"for sample {i} got {len(rewards)} and {len(response_ids)}"
             )
 
-        if generator_output["rollout_logprobs"]:
+        if (
+            generator_output["rollout_logprobs"]
+            and generator_output["rollout_logprobs"][i] is not None
+        ):
             assert len(response_ids) == len(generator_output["rollout_logprobs"][i]), (
                 f"Response ids and rollout logprobs must have the same length, "
                 f"for sample {i} got {len(response_ids)} and {len(generator_output['rollout_logprobs'][i])}"

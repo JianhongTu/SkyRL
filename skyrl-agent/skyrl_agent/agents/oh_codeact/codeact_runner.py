@@ -3,7 +3,6 @@ import pandas as pd
 import traceback
 import time
 
-from skyrl_agent.agents.oh_codeact.codeact_agent import OHCodeActAgent
 from skyrl_agent.dispatcher.async_utils import call_sync_from_async
 from skyrl_agent.config.configuration_utils import TrajectoryConfig
 from skyrl_agent.agents.base import BaseTrajectory, TrajectoryResult, TrajectoryConfig, AsyncInferBackend, AutoTokenizer
@@ -122,7 +121,7 @@ class CodeActTrajectory(BaseTrajectory):
         instance_id = data["instance_id"] if data["instance_id"] else batch_id
         instance = pd.Series(data["instance"])
         data_source = data["data_source"]
-        self.agent = OHCodeActAgent(traj_config=self.cfg, infer_engine=self.infer_engine, tokenizer=self.tokenizer)
+        self.agent = self.agent_cls(traj_config=self.cfg, infer_engine=self.infer_engine, tokenizer=self.tokenizer)
 
         init_successful = False
         try:

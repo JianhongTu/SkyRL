@@ -2,8 +2,8 @@
 
 Runs the EXACT training rollout code path (AutoAgentRunner.run -> CodeActTrajectory
 -> run_controller -> agent.step()) against a served vLLM via the openai_server
-backend. Importing ``hermes_codeact_agent`` rebinds the agent the trajectory
-builds, so this exercises our hermes subclass without editing skyrl-agent.
+backend. Importing ``hermes_codeact_agent`` makes the class selected by the task
+config available, so this exercises our Hermes subclass directly.
 
 PURPOSE: confirm the model now emits clean <tool_call> (not <function>/escaped),
 makes a real edit, and does NOT loop — the fix validated in the eval.
@@ -35,10 +35,10 @@ import os
 import sys
 from pathlib import Path
 
-# --- make the subclass importable and ACTIVATE it (rebinds OHCodeActAgent) ----
+# --- make the subclass importable ---------------------------------------------
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE))
-import hermes_codeact_agent  # noqa: E402,F401  (side effect: monkeypatch)
+import hermes_codeact_agent  # noqa: E402
 
 from datasets import load_dataset  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
@@ -60,32 +60,13 @@ def _oai_patched_init(self, infer_engine, cfg=None, tokenizer=None, **_kw):  # n
 
 _oai_backend.OpenAIBackend.__init__ = _oai_patched_init
 
-# SWEBenchTask defaults to runtime_mode="image" -> the remote runtime BUILDS a
-# runtime image per instance (slow). We want MOUNTED mode (like the eval): mount
-# the prebuilt d3c99cd bundle, build nothing. get_default_sandbox_config_for_eval
-# never sets runtime_mode and SandboxConfig isn't env-backed, so force it here.
-from skyrl_agent.tasks.swebench import utils as _swe_utils  # noqa: E402
-
-_swe_orig_sbcfg = _swe_utils.get_default_sandbox_config_for_eval
-
-
-def _swe_mounted_sbcfg():
-    cfg = _swe_orig_sbcfg()
-    cfg.runtime_mode = "mounted"
-    cfg.runtime_bundle_host_path = os.environ.get(
-        "SANDBOX_RUNTIME_BUNDLE_HOST_PATH",
-        "/home/ec2-user/tovi/openhands-runtime-bundles/d3c99cd",
-    )
-    cfg.runtime_bundle_container_path = "/opt/openhands-runtime"
-    print(
-        f"[SMOKE] mounted sandbox cfg: runtime_mode={cfg.runtime_mode} "
-        f"bundle={cfg.runtime_bundle_host_path}",
-        flush=True,
-    )
-    return cfg
-
-
-_swe_utils.get_default_sandbox_config_for_eval = _swe_mounted_sbcfg
+os.environ.setdefault("SANDBOX_RUNTIME_MODE", "mounted")
+os.environ.setdefault(
+    "SANDBOX_RUNTIME_BUNDLE_HOST_PATH", "/opt/openhands-runtime/current"
+)
+os.environ.setdefault(
+    "SANDBOX_RUNTIME_BUNDLE_CONTAINER_PATH", "/opt/openhands-runtime"
+)
 
 # --- env / defaults -----------------------------------------------------------
 os.environ.setdefault("OPENAI_API_KEY", "sc")          # OpenAIBackend asserts this

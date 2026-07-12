@@ -4,6 +4,7 @@ import copy
 import importlib.util
 import re
 import sys
+import threading
 import time
 from collections import defaultdict
 from pathlib import Path
@@ -61,10 +62,241 @@ def test_rl_recipe_enforces_validated_runtime_limits():
     assert "CKPT_INTERVAL=${CKPT_INTERVAL:-1}" in smoke_launcher
     assert 'trainer.max_training_steps="$MAX_TRAINING_STEPS"' in smoke_launcher
 
-    entrypoint = (
-        ROOT / "examples/train/multi-env/rl/rl_train_entry.py"
+    assert "/opt/openhands-runtime/current" in launcher
+
+
+def test_rl_recipe_activates_hermes_and_mounted_runtime_in_ray_worker():
+    task_config = (
+        ROOT / "examples/train/multi-env/rl/skyrl_swe_30b.yaml"
     ).read_text()
-    assert '"/opt/openhands-runtime/current"' in entrypoint
+    assert "agent_cls: hermes_codeact_agent.HermesOHCodeActAgent" in task_config
+
+    mapping = (
+        ROOT / "skyrl-agent/skyrl_agent/agents/mapping.py"
+    ).read_text()
+    assert mapping.count('"hermes_codeact_agent.HermesOHCodeActAgent"') == 2
+
+    runner = (
+        ROOT / "skyrl-agent/skyrl_agent/agents/oh_codeact/codeact_runner.py"
+    ).read_text()
+    assert "self.agent = self.agent_cls(" in runner
+
+    launcher = (
+        ROOT / "examples/train/multi-env/rl/run_skyrl_swe_30b.sh"
+    ).read_text()
+    assert "SKYRL_PYTHONPATH_EXPORT=${SKYRL_PYTHONPATH_EXPORT:-1}" in launcher
+    assert "SANDBOX_RUNTIME_MODE=${SANDBOX_RUNTIME_MODE:-mounted}" in launcher
+    assert 'SANDBOX_RUNTIME_BUNDLE_HOST_PATH:-/opt/openhands-runtime/current' in launcher
+
+    ray_runtime = (ROOT / "skyrl/train/utils/utils.py").read_text()
+    for name in (
+        "SANDBOX_RUNTIME_MODE",
+        "SANDBOX_RUNTIME_BUNDLE_HOST_PATH",
+        "SANDBOX_RUNTIME_BUNDLE_CONTAINER_PATH",
+    ):
+        assert name in ray_runtime
+
+    swe_utils = (
+        ROOT / "skyrl-agent/skyrl_agent/tasks/swebench/utils.py"
+    ).read_text()
+    assert 'os.environ.get("SANDBOX_RUNTIME_MODE")' in swe_utils
+    assert "runtime_bundle_host_path" in swe_utils
+
+
+def test_swebench_mounted_runtime_config_from_env():
+    source_path = ROOT / "skyrl-agent/skyrl_agent/tasks/swebench/utils.py"
+    tree = ast.parse(source_path.read_text(), filename=str(source_path))
+    function = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "get_default_sandbox_config_for_eval"
+    )
+
+    class SandboxConfig(SimpleNamespace):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+
+    namespace = {
+        "SandboxConfig": SandboxConfig,
+        "os": SimpleNamespace(
+            environ={
+                "ALLHANDS_API_KEY": "test-key",
+                "SANDBOX_REMOTE_RUNTIME_API_URL": "http://runtime:3000",
+                "SANDBOX_RUNTIME_MODE": "mounted",
+                "SANDBOX_RUNTIME_BUNDLE_HOST_PATH": "/opt/openhands-runtime/current",
+            }
+        ),
+    }
+    exec(
+        compile(
+            ast.Module(body=[function], type_ignores=[]), str(source_path), "exec"
+        ),
+        namespace,
+    )
+
+    config = namespace["get_default_sandbox_config_for_eval"]()
+
+    assert config.runtime_mode == "mounted"
+    assert config.runtime_bundle_host_path == "/opt/openhands-runtime/current"
+    assert config.runtime_bundle_container_path == "/opt/openhands-runtime"
+
+    del namespace["os"].environ["SANDBOX_RUNTIME_BUNDLE_HOST_PATH"]
+    try:
+        namespace["get_default_sandbox_config_for_eval"]()
+    except ValueError as exc:
+        assert "SANDBOX_RUNTIME_BUNDLE_HOST_PATH must be set" in str(exc)
+    else:
+        raise AssertionError("Expected mounted runtime configuration to require a host path")
+
+
+def test_generator_validation_accepts_missing_per_sample_logprobs():
+    source_path = (
+        ROOT / "skyrl-agent/skyrl_agent/integrations/skyrl_train/trainer.py"
+    )
+    tree = ast.parse(source_path.read_text(), filename=str(source_path))
+    function = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "validate_generator_output"
+    )
+
+    class Array:
+        def sum(self):
+            return 1
+
+    namespace = {
+        "GeneratorInput": dict,
+        "GeneratorOutput": dict,
+        "logger": SimpleNamespace(warning=lambda *_args, **_kwargs: None),
+        "np": SimpleNamespace(concatenate=lambda _values: Array()),
+    }
+    exec(
+        compile(
+            ast.Module(body=[function], type_ignores=[]), str(source_path), "exec"
+        ),
+        namespace,
+    )
+
+    namespace["validate_generator_output"](
+        {},
+        {
+            "prompt_token_ids": [[0]],
+            "response_ids": [[1]],
+            "loss_masks": [[1]],
+            "rewards": [0.0],
+            "rollout_logprobs": [None],
+        },
+    )
+
+
+def test_skyrl_backend_reuses_shared_inference_client():
+    source_path = (
+        ROOT
+        / "skyrl-agent/skyrl_agent/integrations/skyrl_train/skyrl_train_backend.py"
+    )
+    tree = ast.parse(source_path.read_text(), filename=str(source_path))
+    backend_class = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "SkyRLBackend"
+    )
+    class AsyncInferBackend:
+        pass
+
+    class Client:
+        def __init__(self):
+            self.calls = 0
+
+        async def generate(self, _input_obj, model):
+            assert model == "policy"
+            self.calls += 1
+            return {
+                "responses": ["ok"],
+                "response_ids": [[1, 2]],
+                "stop_reasons": ["stop"],
+            }
+
+    namespace = {
+        "Any": object,
+        "List": list,
+        "AsyncInferBackend": AsyncInferBackend,
+        "resolve_policy_model_name": lambda _cfg: "policy",
+    }
+    exec(
+        compile(
+            ast.Module(body=[backend_class], type_ignores=[]),
+            str(source_path),
+            "exec",
+        ),
+        namespace,
+    )
+    backend = namespace["SkyRLBackend"].__new__(namespace["SkyRLBackend"])
+    backend.policy_model_name = "policy"
+    backend.client = Client()
+
+    response, metadata = asyncio.run(
+        backend.async_generate_ids([0], {"max_tokens": 2})
+    )
+
+    assert response == "ok"
+    assert metadata["output_tokens"] == [1, 2]
+    assert backend.client.calls == 1
+
+
+def test_sync_to_async_bridge_uses_one_persistent_event_loop():
+    source_path = ROOT / "skyrl-agent/skyrl_agent/dispatcher/async_utils.py"
+    source = source_path.read_text()
+
+    assert "self._submissions.put" in source
+    assert "asyncio.run(arun())" not in source
+    assert "asyncio.new_event_loop()" in source
+
+    spec = importlib.util.spec_from_file_location("test_async_utils", source_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    lock = threading.Lock()
+    state = {"active": 0, "peak": 0}
+    loop_ids = set()
+    results = []
+    errors = []
+
+    async def probe():
+        with lock:
+            loop_ids.add(id(asyncio.get_running_loop()))
+            state["active"] += 1
+            state["peak"] = max(state["peak"], state["active"])
+        await asyncio.sleep(0.05)
+        with lock:
+            state["active"] -= 1
+        return "ok"
+
+    def invoke():
+        try:
+            results.append(module.call_async_from_sync(probe, 2))
+        except Exception as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=invoke) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert not errors
+    assert results == ["ok"] * 8
+    assert len(loop_ids) == 1
+    assert state["peak"] > 1
+
+
+def test_colocated_startup_closes_session_before_event_loop_exit():
+    source = (ROOT / "skyrl/train/entrypoints/main_base.py").read_text()
+    sleep = source.index("await client.sleep()")
+    close = source.index("await client.aclose()", sleep)
+    run = source.index("asyncio.run(sleep_inference_client())", close)
+
+    assert sleep < close < run
 
 
 def test_diagnostic_parser_describes_iteration_cap_as_trainable():
@@ -282,6 +514,13 @@ def test_hermes_generation_records_transitions():
     assert 'thought="CONTEXT_BUDGET_REACHED"' in source
     assert 'self.transitions[-1].metrics["trainable"] = False' in source
     assert 'thought="TRUNCATED_RESPONSE"' in source
+
+    backend = (
+        ROOT
+        / "skyrl-agent/skyrl_agent/integrations/skyrl_train/skyrl_train_backend.py"
+    ).read_text()
+    assert "replace(" not in backend
+    assert "await client.aclose()" not in backend
     assert source.index("tool_calls, thought = self._parse_hermes_tool_calls") < source.index(
         'if stop_reason == "length":'
     )

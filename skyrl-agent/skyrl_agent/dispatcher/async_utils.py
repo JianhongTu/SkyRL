@@ -1,10 +1,71 @@
 import asyncio
+import queue
+import threading
 from concurrent import futures
-from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, Coroutine, Iterable, List
 
 GENERAL_TIMEOUT: int = 15
-EXECUTOR = ThreadPoolExecutor()
+
+
+class _AsyncLoopThread:
+    """Own one event loop for coroutines called from synchronous agent code."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._ready = threading.Event()
+        self._loop = None
+        self._thread = None
+        self._submissions = queue.Queue()
+
+    def submit(self, coro: Coroutine):
+        with self._lock:
+            if self._thread is None or not self._thread.is_alive():
+                self._ready.clear()
+                self._thread = threading.Thread(target=self._run, daemon=True)
+                self._thread.start()
+        self._ready.wait()
+        result = futures.Future()
+        self._submissions.put((coro, result))
+        return result
+
+    def _run(self):
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        self._loop = loop
+        self._ready.set()
+        pending = set()
+        while True:
+            if not pending:
+                coro, result = self._submissions.get()
+                self._create_task(loop, pending, coro, result)
+            while True:
+                try:
+                    coro, result = self._submissions.get_nowait()
+                except queue.Empty:
+                    break
+                self._create_task(loop, pending, coro, result)
+            loop.run_until_complete(asyncio.sleep(0.01))
+
+    @staticmethod
+    def _create_task(loop, pending, coro, result):
+        task = loop.create_task(coro)
+        pending.add(task)
+
+        def complete(completed):
+            pending.remove(completed)
+            if result.cancelled():
+                return
+            if completed.cancelled():
+                result.cancel()
+            elif completed.exception() is not None:
+                result.set_exception(completed.exception())
+            else:
+                result.set_result(completed.result())
+
+        task.add_done_callback(complete)
+
+
+ASYNC_LOOP_THREAD = _AsyncLoopThread()
 
 
 async def call_sync_from_async(fn: Callable, *args, **kwargs):
@@ -35,18 +96,9 @@ def call_async_from_sync(corofn: Callable, timeout: float = GENERAL_TIMEOUT, *ar
         result = await coro
         return result
 
-    def run():
-        loop_for_thread = asyncio.new_event_loop()
-        try:
-            asyncio.set_event_loop(loop_for_thread)
-            return asyncio.run(arun())
-        finally:
-            loop_for_thread.close()
-
-    future = EXECUTOR.submit(run)
+    future = ASYNC_LOOP_THREAD.submit(arun())
     futures.wait([future], timeout=timeout or None)
-    result = future.result()
-    return result
+    return future.result()
 
 
 async def call_coro_in_bg_thread(corofn: Callable, timeout: float = GENERAL_TIMEOUT, *args, **kwargs):

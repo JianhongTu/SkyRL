@@ -134,7 +134,10 @@ def validate_generator_output(input_batch: GeneratorInput, generator_output: Gen
                 response_ids
             ), f"Token rewards and response ids must have the same length, for sample {i} got {len(rewards)} and {len(response_ids)}"
 
-        if generator_output["rollout_logprobs"]:
+        if (
+            generator_output["rollout_logprobs"]
+            and generator_output["rollout_logprobs"][i] is not None
+        ):
             assert len(response_ids) == len(
                 generator_output["rollout_logprobs"][i]
             ), f"Response ids and rollout logprobs must have the same length, for sample {i} got {len(response_ids)} and {len(generator_output['rollout_logprobs'][i])}"

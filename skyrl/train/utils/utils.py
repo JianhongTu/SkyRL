@@ -707,6 +707,14 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
             logger.info(f"Exporting {var_name} to ray runtime env")
             env_vars[var_name] = value
 
+    for var_name in [
+        "SANDBOX_RUNTIME_MODE",
+        "SANDBOX_RUNTIME_BUNDLE_HOST_PATH",
+        "SANDBOX_RUNTIME_BUNDLE_CONTAINER_PATH",
+    ]:
+        if value := os.environ.get(var_name):
+            env_vars[var_name] = value
+
     if SKYRL_LD_LIBRARY_PATH_EXPORT:
         # export `LD_LIBRARY_PATH` to ray runtime env.
         # For some reason the `LD_LIBRARY_PATH` is not exported to the worker with .env file.
