@@ -191,6 +191,55 @@ def test_generator_validation_accepts_missing_per_sample_logprobs():
     )
 
 
+def test_agent_trainer_expands_stepwise_uids_before_postprocessing():
+    source_path = (
+        ROOT / "skyrl-agent/skyrl_agent/integrations/skyrl_train/trainer.py"
+    )
+    tree = ast.parse(source_path.read_text(), filename=str(source_path))
+    trainer_class = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "SkyRLAgentPPOTrainer"
+    )
+    train_method = next(
+        node
+        for node in trainer_class.body
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "train"
+    )
+    uid_expansion = next(
+        node
+        for node in ast.walk(train_method)
+        if isinstance(node, ast.If)
+        and ast.unparse(node.test) == "self.cfg.generator.step_wise_trajectories"
+    )
+
+    namespace = {
+        "self": SimpleNamespace(
+            cfg=SimpleNamespace(
+                generator=SimpleNamespace(step_wise_trajectories=True)
+            )
+        ),
+        "generator_output": {
+            "trajectory_ids": [
+                SimpleNamespace(instance_id="prompt-a"),
+                SimpleNamespace(instance_id="prompt-a"),
+                SimpleNamespace(instance_id="prompt-b"),
+            ]
+        },
+        "uids": ["prompt-a", "prompt-b"],
+    }
+    exec(
+        compile(
+            ast.Module(body=[uid_expansion], type_ignores=[]),
+            str(source_path),
+            "exec",
+        ),
+        namespace,
+    )
+
+    assert namespace["uids"] == ["prompt-a", "prompt-a", "prompt-b"]
+
+
 def test_skyrl_backend_reuses_shared_inference_client():
     source_path = (
         ROOT

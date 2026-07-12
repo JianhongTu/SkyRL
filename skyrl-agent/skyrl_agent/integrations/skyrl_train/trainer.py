@@ -332,6 +332,11 @@ class SkyRLAgentPPOTrainer(RayPPOTrainer):
                     with Timer("generate", self.all_timings):
                         generator_output: GeneratorOutput = await self.generate(generator_input)
 
+                    if self.cfg.generator.step_wise_trajectories:
+                        # Step-wise output has one row per turn, so the prompt-level
+                        # UIDs returned by prepare_generator_input no longer align.
+                        uids = [trajectory_id.instance_id for trajectory_id in generator_output["trajectory_ids"]]
+
                     # dynamic sampling
                     if self.cfg.trainer.algorithm.dynamic_sampling.type is not None:
                         generator_output, uids, keep_sampling = self.handle_dynamic_sampling(generator_output, uids)
