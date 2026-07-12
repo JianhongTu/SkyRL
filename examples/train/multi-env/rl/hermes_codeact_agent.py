@@ -64,7 +64,6 @@ from skyrl_agent.agents.rollout_diagnostic_utils import (
 )
 from skyrl_agent.dispatcher.async_utils import call_async_from_sync
 from skyrl_agent.functional.function_calling import convert_str_to_completion_format
-from skyrl_agent.functional.utils import record_transition
 
 # Training-matching acc-thinking template (byte copy from skyrl/train), shipped
 # next to this file so the rollout prompt is byte-faithful to the SFT.
@@ -76,15 +75,6 @@ _HERMES_TOOL_CALL_RE = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.
 
 class HermesOHCodeActAgent(OHCodeActAgent):
     """OHCodeActAgent variant that prompts and parses in Qwen hermes format."""
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.transitions = []
-
-    @record_transition
-    async def _generate(self, **kwargs):
-        """Generate once while preserving the exact sampled input/output token IDs."""
-        return await self.infer_engine.async_generate_ids(**kwargs)
 
     def _is_last_action_finish(self, state: State):
         """Preserve context terminal reasons instead of labeling them as finish."""
@@ -241,7 +231,7 @@ class HermesOHCodeActAgent(OHCodeActAgent):
             )
 
             response_str, meta_info = call_async_from_sync(
-                self._generate,
+                self.infer_engine.async_generate_ids,
                 input_ids=input_ids,
                 sampling_params=sampling_params,
                 request_id=self.agent_id,
@@ -263,7 +253,9 @@ class HermesOHCodeActAgent(OHCodeActAgent):
             tool_calls, thought = self._parse_hermes_tool_calls(response_str)
             if not tool_calls:
                 if stop_reason == "length":
-                    self.transitions[-1].metrics["trainable"] = False
+                    # Keep earlier complete turns trainable, but do not include an
+                    # incomplete final generation in the flattened trajectory.
+                    self.messages.pop()
                     return AgentFinishAction(thought="TRUNCATED_RESPONSE")
                 # no valid <tool_call> — mirror base's no-action handling; the
                 # codeact_user_response nudge ("No function call detected...") will

@@ -191,55 +191,6 @@ def test_generator_validation_accepts_missing_per_sample_logprobs():
     )
 
 
-def test_agent_trainer_expands_stepwise_uids_before_postprocessing():
-    source_path = (
-        ROOT / "skyrl-agent/skyrl_agent/integrations/skyrl_train/trainer.py"
-    )
-    tree = ast.parse(source_path.read_text(), filename=str(source_path))
-    trainer_class = next(
-        node
-        for node in tree.body
-        if isinstance(node, ast.ClassDef) and node.name == "SkyRLAgentPPOTrainer"
-    )
-    train_method = next(
-        node
-        for node in trainer_class.body
-        if isinstance(node, ast.AsyncFunctionDef) and node.name == "train"
-    )
-    uid_expansion = next(
-        node
-        for node in ast.walk(train_method)
-        if isinstance(node, ast.If)
-        and ast.unparse(node.test) == "self.cfg.generator.step_wise_trajectories"
-    )
-
-    namespace = {
-        "self": SimpleNamespace(
-            cfg=SimpleNamespace(
-                generator=SimpleNamespace(step_wise_trajectories=True)
-            )
-        ),
-        "generator_output": {
-            "trajectory_ids": [
-                SimpleNamespace(instance_id="prompt-a"),
-                SimpleNamespace(instance_id="prompt-a"),
-                SimpleNamespace(instance_id="prompt-b"),
-            ]
-        },
-        "uids": ["prompt-a", "prompt-b"],
-    }
-    exec(
-        compile(
-            ast.Module(body=[uid_expansion], type_ignores=[]),
-            str(source_path),
-            "exec",
-        ),
-        namespace,
-    )
-
-    assert namespace["uids"] == ["prompt-a", "prompt-a", "prompt-b"]
-
-
 def test_skyrl_backend_reuses_shared_inference_client():
     source_path = (
         ROOT
@@ -528,7 +479,7 @@ def test_exact_output_tokens_require_server_token_ids():
     assert '"require_token_ids": True' in diagnostic_source
 
 
-def test_hermes_generation_records_transitions():
+def test_hermes_generation_keeps_trajectory_level_training_contract():
     source_path = ROOT / "examples/train/multi-env/rl/hermes_codeact_agent.py"
     source = source_path.read_text()
     tree = ast.parse(source, filename=str(source_path))
@@ -537,31 +488,22 @@ def test_hermes_generation_records_transitions():
         for node in tree.body
         if isinstance(node, ast.ClassDef) and node.name == "HermesOHCodeActAgent"
     )
-    generate = next(
-        node
-        for node in class_node.body
-        if isinstance(node, ast.AsyncFunctionDef) and node.name == "_generate"
-    )
     step = next(
         node
         for node in class_node.body
         if isinstance(node, ast.FunctionDef) and node.name == "step"
     )
 
-    assert any(
-        isinstance(decorator, ast.Name) and decorator.id == "record_transition"
-        for decorator in generate.decorator_list
-    )
+    assert "record_transition" not in source
+    assert "self.transitions" not in source
     assert any(
         isinstance(node, ast.Attribute)
-        and isinstance(node.value, ast.Name)
-        and node.value.id == "self"
-        and node.attr == "_generate"
+        and node.attr == "async_generate_ids"
         for node in ast.walk(step)
     )
     assert "if len(input_ids) > self.max_prompt_length:" in source
     assert 'thought="CONTEXT_BUDGET_REACHED"' in source
-    assert 'self.transitions[-1].metrics["trainable"] = False' in source
+    assert "self.messages.pop()" in source
     assert 'thought="TRUNCATED_RESPONSE"' in source
 
     backend = (

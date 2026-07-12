@@ -56,9 +56,10 @@ _(Bracketed tags map to the original issue list 1–5.)_
 Environment is **locked**: env pins in `pyproject.toml` / `uv.lock`; the MoE weight-sync fix
 lives in the skyrl source and is installed editable, so it needs no re-applying.
 
-Hermes rollouts now record exact sampled input/output token IDs; training no longer reconstructs
-them through the generic message-template fallback. Structured records include task and shaped
-rewards, finish bonus, mask status, token counts, stop reasons, and generation/evaluation timing.
+The diagnostic harness records exact sampled output token IDs. RL training follows the shipped
+SkyRL-Agent contract and flattens each completed trajectory through the message-template path,
+producing one training sample per rollout. Structured records include task and shaped rewards,
+finish bonus, mask status, token counts, stop reasons, and generation/evaluation timing.
 
 `diagnostics/` holds the dry-run harness:
 - `collect_batch.py` — derive the real task config, reproduce the seeded first 32×8
