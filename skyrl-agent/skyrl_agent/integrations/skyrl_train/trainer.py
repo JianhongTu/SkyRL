@@ -251,6 +251,10 @@ class SkyRLAgentPPOTrainer(RayPPOTrainer):
         # reinitialize with new dataloader function for exact reproducibility across backends
         self.train_dataloader = build_dataloader(self.cfg, self.train_dataset, is_train=True)
         self.total_training_steps = len(self.train_dataloader) * self.cfg.trainer.epochs
+        if self.cfg.trainer.max_training_steps is not None:
+            self.total_training_steps = min(
+                self.total_training_steps, self.cfg.trainer.max_training_steps
+            )
         self.eval_dataloader = (
             build_dataloader(self.cfg, self.eval_dataset, is_train=False) if self.eval_dataset is not None else None
         )
@@ -310,6 +314,7 @@ class SkyRLAgentPPOTrainer(RayPPOTrainer):
         # main training loop
         pbar = tqdm(total=self.total_training_steps, initial=self.global_step, desc="Training Batches Processed")
         self.global_step += 1  # start training at global_step 1
+        stop_training = False
         for epoch in range(self.cfg.trainer.epochs):
             for iter, rand_prompts in enumerate(self.train_dataloader):
                 with Timer("step", self.all_timings):
@@ -433,7 +438,20 @@ class SkyRLAgentPPOTrainer(RayPPOTrainer):
 
                 self.global_step += 1
 
+                if (
+                    self.cfg.trainer.max_training_steps is not None
+                    and self.global_step > self.cfg.trainer.max_training_steps
+                ):
+                    logger.info(
+                        f"Reached max_training_steps={self.cfg.trainer.max_training_steps}, stopping early."
+                    )
+                    stop_training = True
+                    break
+
                 del training_input, generator_output
+
+            if stop_training:
+                break
 
         pbar.close()
         if self.colocate_all:

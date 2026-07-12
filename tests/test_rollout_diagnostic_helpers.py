@@ -191,6 +191,35 @@ def test_generator_validation_accepts_missing_per_sample_logprobs():
     )
 
 
+def test_agent_trainer_honors_max_training_steps():
+    source_path = (
+        ROOT / "skyrl-agent/skyrl_agent/integrations/skyrl_train/trainer.py"
+    )
+    tree = ast.parse(source_path.read_text(), filename=str(source_path))
+    trainer_class = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "SkyRLAgentPPOTrainer"
+    )
+    init_method = next(
+        node
+        for node in trainer_class.body
+        if isinstance(node, ast.FunctionDef) and node.name == "__init__"
+    )
+    train_method = next(
+        node
+        for node in trainer_class.body
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "train"
+    )
+    init_source = ast.unparse(init_method)
+    train_source = ast.unparse(train_method)
+
+    assert "min(self.total_training_steps, self.cfg.trainer.max_training_steps)" in init_source
+    assert "stop_training = False" in train_source
+    assert "self.global_step > self.cfg.trainer.max_training_steps" in train_source
+    assert "if stop_training:" in train_source
+
+
 def test_skyrl_backend_reuses_shared_inference_client():
     source_path = (
         ROOT
