@@ -8,7 +8,7 @@ Usage:
 
     <rollout.log>    the captured stdout of a collect_batch.py run
     max_iterations   turn cap used for that run (default 50); trajectories that
-                     reach it are the ones the trainer masks out
+                     reach it retain their valid training prefix
 """
 import re, json, sys, statistics as st
 from collections import Counter, defaultdict
@@ -70,7 +70,7 @@ print(f"  => trajectories 3-phase would touch: {len(benefit)}/{ntraj}")
 print("\n## Q2 END REASON")
 finish_traj = {k for k, v in turns.items() if any("finish" in tool_names(t["resp"]) for t in v)}
 capped = {k for k in turns if maxstep.get(k, 0) >= CAP}
-print(f"  reached cap (max_iterations -> MASKED OUT): {len(capped)}/{ntraj} ({100*len(capped)/ntraj:.0f}%)")
+print(f"  reached iteration cap (prefix remains trainable): {len(capped)}/{ntraj} ({100*len(capped)/ntraj:.0f}%)")
 print(f"  ever emit a finish tool_call:               {len(finish_traj)}/{ntraj}")
 steps = sorted(maxstep.values())
 print(f"  max-step per traj: median={st.median(steps)} min={min(steps)} <cap={sum(s<CAP for s in steps)}")

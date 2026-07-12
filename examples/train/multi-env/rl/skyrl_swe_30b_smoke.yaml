@@ -45,23 +45,23 @@ generator:
   # 20 iters (vs 50) keep the loop-validation cheap.
   num_trajectories: 2
   max_iterations: 20
-  max_prompt_length: 28000
+  max_prompt_length: 30720
   sampling_params:
     # temp 0.6 (NOT 1.0): at 1.0 this SFT init DEGENERATES — it rambles to the
     # per-turn max-token cap emitting NO valid <tool_call> and no <|im_end|>, so
-    # every trajectory ends CONTEXT_WINDOW_EXCEEDED on turn 1 (stop_reason=length).
+    # every trajectory ends TRUNCATED_RESPONSE on turn 1 (stop_reason=length).
     # temp 0.6 is what the 23% eval + the standalone rollout smoke used (clean
     # multi-turn tool calls). See memory multi-env-sft-rollout-gap.
     temperature: 0.6
     top_p: 0.95
     top_k: -1
-    max_tokens: 4000
+    max_tokens: 2048
   val_config:
     num_trajectories: 1
     sampling_params:
       temperature: 0.6
       top_p: 0.95
-      max_tokens: 4000
+      max_tokens: 2048
   remove_think_tokens: false
   vision_is_active: false
   # acc-thinking template: matches our SFT (World A / KEEP reasoning). See

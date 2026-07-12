@@ -14,10 +14,13 @@ MASK_OUT_REASONS = frozenset(
         "cmd_timeout",
     }
 )
+PREFIX_TRAINABLE_TERMINAL_REASONS = frozenset(
+    {"CONTEXT_BUDGET_REACHED", "TRUNCATED_RESPONSE"}
+)
 NON_FINISH_TERMINAL_REASONS = MASK_OUT_REASONS | {
     "error_initialization",
     "max_iterations_reached",
-}
+} | PREFIX_TRAINABLE_TERMINAL_REASONS
 FINISH_REWARD_BONUS = 0.05
 
 _HERMES_TOOL_CALL_RE = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.DOTALL)
@@ -29,6 +32,11 @@ _LEGACY_FINISH_RE = re.compile(
 def bounded_max_tokens(configured: int, remaining: int) -> int:
     """Respect the configured per-turn cap and the remaining context budget."""
     return min(configured, remaining)
+
+
+def remaining_generation_tokens(input_length: int, model_max_length: int) -> int:
+    """Return the native model budget remaining after the full encoded input."""
+    return max(0, model_max_length - input_length)
 
 
 def extract_exact_output_tokens(choice: dict[str, Any]) -> list[int]:

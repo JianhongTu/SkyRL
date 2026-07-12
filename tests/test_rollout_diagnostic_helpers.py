@@ -2,6 +2,7 @@ import ast
 import asyncio
 import copy
 import importlib.util
+import re
 import sys
 import time
 from collections import defaultdict
@@ -11,6 +12,36 @@ from types import SimpleNamespace
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_multi_env_rl_uses_native_context_window_split():
+    prompt_tokens = 30_720
+    generation_tokens = 2_048
+    assert prompt_tokens + generation_tokens == 32_768
+
+    for relative_path in (
+        "examples/train/multi-env/rl/skyrl_swe_30b.yaml",
+        "examples/train/multi-env/rl/skyrl_swe_30b_smoke.yaml",
+    ):
+        source = (ROOT / relative_path).read_text()
+        assert re.search(r"^  max_prompt_length: 30720$", source, re.MULTILINE)
+        assert len(re.findall(r"^\s+max_tokens: 2048$", source, re.MULTILINE)) == 2
+
+    launcher = (
+        ROOT / "examples/train/multi-env/rl/run_skyrl_swe_30b.sh"
+    ).read_text()
+    assert "trainer.max_prompt_length=${MAX_PROMPT_LEN:-30720}" in launcher
+    assert "generator.sampling_params.max_generate_length=2048" in launcher
+    assert "generator.eval_sampling_params.max_generate_length=2048" in launcher
+
+
+def test_diagnostic_parser_describes_iteration_cap_as_trainable():
+    source = (
+        ROOT / "examples/train/multi-env/rl/diagnostics/parse_log.py"
+    ).read_text()
+
+    assert "iteration cap (prefix remains trainable)" in source
+    assert "max_iterations -> MASKED OUT" not in source
 
 
 def _load_module(name: str, relative_path: str):
@@ -30,6 +61,29 @@ def test_generation_limit_preserves_configured_cap():
 
     assert helpers.bounded_max_tokens(configured=4000, remaining=28000) == 4000
     assert helpers.bounded_max_tokens(configured=4000, remaining=2500) == 2500
+
+
+def test_native_model_budget_uses_full_encoded_input_length():
+    helpers = _load_module(
+        "rollout_native_budget_utils",
+        "skyrl-agent/skyrl_agent/agents/rollout_diagnostic_utils.py",
+    )
+
+    assert helpers.remaining_generation_tokens(30_720, 32_768) == 2_048
+    assert helpers.remaining_generation_tokens(32_000, 32_768) == 768
+    assert helpers.remaining_generation_tokens(32_768, 32_768) == 0
+    assert helpers.remaining_generation_tokens(33_000, 32_768) == 0
+
+
+def test_context_terminals_preserve_valid_prefixes():
+    helpers = _load_module(
+        "rollout_context_terminal_utils",
+        "skyrl-agent/skyrl_agent/agents/rollout_diagnostic_utils.py",
+    )
+
+    for reason in ("CONTEXT_BUDGET_REACHED", "TRUNCATED_RESPONSE"):
+        assert reason in helpers.NON_FINISH_TERMINAL_REASONS
+        assert reason not in helpers.MASK_OUT_REASONS
 
 
 @pytest.mark.parametrize(
@@ -163,7 +217,8 @@ def test_exact_output_tokens_require_server_token_ids():
 
 def test_hermes_generation_records_transitions():
     source_path = ROOT / "examples/train/multi-env/rl/hermes_codeact_agent.py"
-    tree = ast.parse(source_path.read_text(), filename=str(source_path))
+    source = source_path.read_text()
+    tree = ast.parse(source, filename=str(source_path))
     class_node = next(
         node
         for node in tree.body
@@ -191,6 +246,13 @@ def test_hermes_generation_records_transitions():
         and node.attr == "_generate"
         for node in ast.walk(step)
     )
+    assert "if len(input_ids) > self.max_prompt_length:" in source
+    assert 'thought="CONTEXT_BUDGET_REACHED"' in source
+    assert 'self.transitions[-1].metrics["trainable"] = False' in source
+    assert 'thought="TRUNCATED_RESPONSE"' in source
+    assert source.index("tool_calls, thought = self._parse_hermes_tool_calls") < source.index(
+        'if stop_reason == "length":'
+    )
 
 
 def test_transition_data_preserves_exact_tokens_and_action_mask():
@@ -211,14 +273,21 @@ def test_transition_data_preserves_exact_tokens_and_action_mask():
             reward=0.0,
             episode_done=False,
         ),
+        utils.Transition(
+            ob=utils.Observation(input_ids=[1, 2, 3, 4, 5, 6]),
+            ac=utils.TokensWithLogprobs(token_ids=[7, 8]),
+            reward=0.0,
+            episode_done=False,
+            metrics={"trainable": False},
+        ),
     ]
 
     data = utils.transitions_to_training_data(transitions)
 
     assert len(data) == 1
     assert data[0].input_tokens == [1, 2]
-    assert data[0].response_tokens == [3, 4, 5]
-    assert data[0].response_mask == [1.0, 0.0, 1.0]
+    assert data[0].response_tokens == [3, 4, 5, 6, 7, 8]
+    assert data[0].response_mask == [1.0, 0.0, 1.0, 0.0, 0.0, 0.0]
 
 
 def test_postprocess_keeps_cap_signal_and_separates_finish_bonus():
@@ -273,6 +342,9 @@ def test_postprocess_keeps_cap_signal_and_separates_finish_bonus():
         "logger": Logger(),
         "OmegaConf": OmegaConf,
         "MASK_OUT_REASONS": helpers.MASK_OUT_REASONS,
+        "PREFIX_TRAINABLE_TERMINAL_REASONS": (
+            helpers.PREFIX_TRAINABLE_TERMINAL_REASONS
+        ),
         "normalize_finish_reason": helpers.normalize_finish_reason,
         "apply_finish_reward_bonus": helpers.apply_finish_reward_bonus,
         "transitions_to_training_data": functional.transitions_to_training_data,
@@ -395,6 +467,63 @@ def test_postprocess_keeps_cap_signal_and_separates_finish_bonus():
     assert output["trajectory_records"][3]["finish_reason"] == (
         "CONTEXT_WINDOW_EXCEEDED"
     )
+
+    budget_result = {
+        "instance_id": "issue",
+        "trajectory_id": 0,
+        "messages": [{"role": "assistant", "content": "valid prefix"}],
+        "transitions": [transition(11)],
+        "reward": 1.0,
+        "finish": True,
+        "finish_reason": "CONTEXT_BUDGET_REACHED",
+    }
+    truncated_result = {
+        "instance_id": "issue",
+        "trajectory_id": 1,
+        "messages": [{"role": "assistant", "content": "partial tool call"}],
+        "transitions": [
+            transition(21),
+            functional.Transition(
+                ob=functional.Observation(input_ids=[21, 22, 23]),
+                ac=functional.TokensWithLogprobs(token_ids=[24, 25]),
+                reward=0.0,
+                episode_done=False,
+                metrics={"trainable": False},
+            ),
+        ],
+        "reward": 1.0,
+        "finish": True,
+        "finish_reason": "TRUNCATED_RESPONSE",
+    }
+    prefix_runner = SimpleNamespace(
+        cfg=SimpleNamespace(
+            generator=SimpleNamespace(
+                num_trajectories=2,
+                val_config=SimpleNamespace(num_trajectories=1),
+                max_prompt_length=10,
+                remove_think_tokens=False,
+            )
+        ),
+        trajectories={
+            "issue": {
+                0: SimpleNamespace(result=budget_result),
+                1: SimpleNamespace(result=truncated_result),
+            }
+        },
+        batch=runner.batch,
+        _get_data=runner._get_data,
+        tokenizer=Tokenizer(),
+    )
+
+    prefix_output = namespace["_post_process_results"](
+        prefix_runner, val_mode=False
+    )
+
+    assert prefix_output["response_ids"] == [[12], [22, 23, 24, 25]]
+    assert prefix_output["loss_masks"] == [[1.0], [1.0, 0.0, 0.0, 0.0]]
+    assert [
+        record["finish_reason"] for record in prefix_output["trajectory_records"]
+    ] == ["CONTEXT_BUDGET_REACHED", "TRUNCATED_RESPONSE"]
 
 
 def test_inline_evaluation_propagates_finish_reason():

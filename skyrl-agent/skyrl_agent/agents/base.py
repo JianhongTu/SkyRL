@@ -23,6 +23,7 @@ from skyrl_agent.functional.chat_template import chat_template, chat_template_qw
 from skyrl_agent.functional.utils import transitions_to_training_data
 from skyrl_agent.agents.rollout_diagnostic_utils import (
     MASK_OUT_REASONS,
+    PREFIX_TRAINABLE_TERMINAL_REASONS,
     apply_finish_reward_bonus,
     normalize_finish_reason,
 )
@@ -477,7 +478,10 @@ class AgentRunner:
                 logprob = logprob[first_nonzero:]
 
             if len(ids) > max_response_length:
-                if reason not in mask_out_reason:
+                if (
+                    reason not in mask_out_reason
+                    and reason not in PREFIX_TRAINABLE_TERMINAL_REASONS
+                ):
                     logger.warning(
                         f"[WARN] Response length {len(ids)} > max_response_length={max_response_length} "
                         f"but finish_reason='{reason}' not in mask_out_reason={mask_out_reason}. "
@@ -595,8 +599,19 @@ class AgentRunner:
         rollout_metrics["rollout_metrics/finish_tool_ratio"] = sum(
             1 for reason in finish_reason_list if reason == "FINISH_TOOL"
         ) / len(finish_reason_list)
+        context_terminal_reasons = {
+            "CONTEXT_WINDOW_EXCEEDED",
+            "CONTEXT_BUDGET_REACHED",
+            "TRUNCATED_RESPONSE",
+        }
         rollout_metrics["rollout_metrics/context_exceed_ratio"] = sum(
-            1 for reason in finish_reason_list if reason == "CONTEXT_WINDOW_EXCEEDED"
+            1 for reason in finish_reason_list if reason in context_terminal_reasons
+        ) / len(finish_reason_list)
+        rollout_metrics["rollout_metrics/context_budget_ratio"] = sum(
+            1 for reason in finish_reason_list if reason == "CONTEXT_BUDGET_REACHED"
+        ) / len(finish_reason_list)
+        rollout_metrics["rollout_metrics/truncated_response_ratio"] = sum(
+            1 for reason in finish_reason_list if reason == "TRUNCATED_RESPONSE"
         ) / len(finish_reason_list)
         # Ratio of trajectories stopped by iteration cap; avoid 'max' in key to prevent max-reduction
         rollout_metrics["rollout_metrics/iter_cap_ratio"] = sum(

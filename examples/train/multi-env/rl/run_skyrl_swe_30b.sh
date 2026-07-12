@@ -187,12 +187,12 @@ fi
   trainer.micro_train_batch_size_per_gpu=1 \
   trainer.ckpt_interval=$CKPT_INTERVAL \
   trainer.max_ckpts_to_keep=$MAX_CKPTS \
-  trainer.max_prompt_length=${MAX_PROMPT_LEN:-28000} \
-  generator.sampling_params.max_generate_length=4000 \
+  trainer.max_prompt_length=${MAX_PROMPT_LEN:-30720} \
+  generator.sampling_params.max_generate_length=2048 \
   generator.sampling_params.temperature=${TEMP:-0.6} \
   generator.sampling_params.top_p=${TOP_P:-0.95} \
   generator.sampling_params.top_k=-1 \
-  generator.eval_sampling_params.max_generate_length=4000 \
+  generator.eval_sampling_params.max_generate_length=2048 \
   generator.eval_sampling_params.temperature=${EVAL_TEMP:-0.6} \
   generator.eval_sampling_params.top_p=${EVAL_TOP_P:-0.95} \
   generator.eval_sampling_params.top_k=-1 \

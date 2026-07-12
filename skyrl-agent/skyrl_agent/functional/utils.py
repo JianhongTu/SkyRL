@@ -230,7 +230,8 @@ def transitions_to_training_data(
         # Add action tokens to sequence
         full_sequence.extend(ac_tokens)
         sampled_logprobs.extend(ac_logprobs)
-        mask.extend([1.0] * len(ac_tokens))
+        action_mask = 1.0 if transition.metrics.get("trainable", True) else 0.0
+        mask.extend([action_mask] * len(ac_tokens))
 
     # Create final datum from remaining accumulated state
     if full_sequence:

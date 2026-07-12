@@ -45,11 +45,11 @@ generator:
   max_iterations: 50
   # Model is Qwen3-30B-A3B, natively 32768 total (no rope scaling). vLLM enforces
   # prompt + max_tokens <= max_model_len per request, so split the 32768 window as
-  # 28k conversation + 4k generation (28000+4000=32000, headroom to 32768). The
-  # agent truncates / stops (CONTEXT_WINDOW_EXCEEDED) once the conversation passes
+  # 30720 conversation + 2048 generation (30720+2048=32768). The
+  # agent stops with CONTEXT_BUDGET_REACHED once the full encoded input passes
   # max_prompt_length, keeping every request under the cap. Raising either needs a
   # bigger-context engine (YaRN); do not set them back to 32768.
-  max_prompt_length: 28000
+  max_prompt_length: 30720
   sampling_params:
     min_tokens: 1
     skip_special_tokens: true
@@ -58,7 +58,7 @@ generator:
     top_p: 0.95
     min_p: 0.0
     top_k: -1
-    max_tokens: 4000
+    max_tokens: 2048
     repetition_penalty: 1.0
     logprobs: 1
     stop: null
@@ -72,7 +72,7 @@ generator:
       top_p: 0.95
       min_p: 0.0
       top_k: -1
-      max_tokens: 4000
+      max_tokens: 2048
       repetition_penalty: 1.0
       logprobs: 1
       stop: null

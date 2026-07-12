@@ -17,6 +17,8 @@ harness. Details in `diagnostics/` (below).
 **P0 — training signal (decides whether RL learns at all)**
 - Turn-cap trajectories are now trainable; only infrastructure/runtime, evaluation, malformed-response,
   loop, and command-timeout failures are masked. Re-measure effective gradient coverage.
+- Reaching the native context budget before generation now preserves the valid trajectory prefix;
+  an incomplete length-truncated generation masks only its own sampled tokens.
 - Finish recognition accepts Hermes and legacy syntax, and a valid training rollout receives a small
   `+0.05` finish bonus. Re-measure whether this improves termination without premature submission. **[4]**
 - **GRPO groups collapse** when a prompt's samples fail to start (sandbox failures cluster
@@ -33,7 +35,8 @@ harness. Details in `diagnostics/` (below).
 **P1 — model behavior (wastes the turn budget → feeds P0)**
 - **Blocking foreground commands** — the task now instructs backgrounding/interruption; measure whether
   a shorter enforced command timeout is still needed.
-- **Reasoning spirals** — per-turn generation is now truly capped at 4K; re-measure before lowering it.
+- **Reasoning spirals** — per-turn generation is now capped at 2K while preserving the model's
+  native 32K prompt-plus-generation window; re-measure rollout quality.
 - **Workspace-path mismatch** — R2E now exposes the learned `/workspace/...` path as an alias to `/testbed`.
 
 **P2 — config & tuning**

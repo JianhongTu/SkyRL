@@ -58,7 +58,10 @@ from openhands.events.event import Event
 from openhands.memory.condenser.condenser import Condensation, View
 
 from skyrl_agent.agents.oh_codeact.codeact_agent import OHCodeActAgent
-from skyrl_agent.agents.rollout_diagnostic_utils import bounded_max_tokens
+from skyrl_agent.agents.rollout_diagnostic_utils import (
+    bounded_max_tokens,
+    remaining_generation_tokens,
+)
 from skyrl_agent.dispatcher.async_utils import call_async_from_sync
 from skyrl_agent.functional.function_calling import convert_str_to_completion_format
 from skyrl_agent.functional.utils import record_transition
@@ -82,6 +85,29 @@ class HermesOHCodeActAgent(OHCodeActAgent):
     async def _generate(self, **kwargs):
         """Generate once while preserving the exact sampled input/output token IDs."""
         return await self.infer_engine.async_generate_ids(**kwargs)
+
+    def _is_last_action_finish(self, state: State):
+        """Preserve context terminal reasons instead of labeling them as finish."""
+        terminal_reasons = {
+            "CONTEXT_BUDGET_REACHED",
+            "TRUNCATED_RESPONSE",
+            "BAD_LLM_RESPONSE",
+            "NO_FUNCTION_CALL",
+            "cmd_timeout",
+        }
+        if state and state.history:
+            last_action = next(
+                (event for event in reversed(state.history) if isinstance(event, Action)),
+                None,
+            )
+            if isinstance(last_action, AgentFinishAction):
+                reason = (
+                    last_action.thought
+                    if last_action.thought in terminal_reasons
+                    else "FINISH_TOOL"
+                )
+                return True, reason
+        return False, None
 
     # ------------------------------------------------------------------ prompt
     def _encode_prompt(self, messages):
@@ -185,6 +211,8 @@ class HermesOHCodeActAgent(OHCodeActAgent):
         response_str = None
         try:
             input_ids = self._encode_prompt(self.messages)
+            configured_max_tokens = int(self.sampling_params.get("max_tokens", 0))
+            model_max_length = self.max_prompt_length + configured_max_tokens
             if len(self.messages) == 2:
                 self.prompt_token_len = len(input_ids)
             else:
@@ -198,13 +226,17 @@ class HermesOHCodeActAgent(OHCodeActAgent):
                     )
                 input_ids = self._encode_prompt(self.messages)
                 self.response_token_len = len(input_ids) - self.prompt_token_len
-            if self.response_token_len >= self.max_prompt_length:
-                return AgentFinishAction(thought="CONTEXT_WINDOW_EXCEEDED")
+            if len(input_ids) > self.max_prompt_length:
+                return AgentFinishAction(thought="CONTEXT_BUDGET_REACHED")
 
             sampling_params = copy.deepcopy(self.sampling_params)
-            remaining_tokens = self.max_prompt_length - self.response_token_len
+            remaining_tokens = remaining_generation_tokens(
+                len(input_ids), model_max_length
+            )
+            if remaining_tokens == 0:
+                return AgentFinishAction(thought="CONTEXT_BUDGET_REACHED")
             sampling_params["max_tokens"] = bounded_max_tokens(
-                configured=sampling_params.get("max_tokens", remaining_tokens),
+                configured=configured_max_tokens,
                 remaining=remaining_tokens,
             )
 
@@ -226,12 +258,13 @@ class HermesOHCodeActAgent(OHCodeActAgent):
             # store the assistant turn VERBATIM (raw <think> + <tool_call>) so the
             # template replays it byte-for-byte on subsequent turns (World-A KEEP).
             self.messages.append({"role": "assistant", "content": response_str})
-            if stop_reason == "length":
-                return AgentFinishAction(thought="CONTEXT_WINDOW_EXCEEDED")
 
             # ---- hermes parse (vs base: convert_non_fncall_messages_to_fncall_messages)
             tool_calls, thought = self._parse_hermes_tool_calls(response_str)
             if not tool_calls:
+                if stop_reason == "length":
+                    self.transitions[-1].metrics["trainable"] = False
+                    return AgentFinishAction(thought="TRUNCATED_RESPONSE")
                 # no valid <tool_call> — mirror base's no-action handling; the
                 # codeact_user_response nudge ("No function call detected...") will
                 # prompt a retry on the next turn.
