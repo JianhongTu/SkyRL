@@ -211,3 +211,103 @@ def test_postprocess_metrics_over_superset():
         ["u1"],
     )
     assert trainer.all_metrics["reward/avg_raw_reward"] == 1.0
+
+
+def test_zero_variance_groups_logged_without_filtering():
+    """Zero-variance groups are observable without changing their loss masks."""
+    config = create_config(4)
+    config.trainer.algorithm.zero_variance_filter = False
+    trainer = RayPPOTrainer(
+        cfg=config,
+        tracker=None,
+        tokenizer=None,
+        train_dataset=DummyDataset(),
+        eval_dataset=None,
+        inference_engine_client=None,
+        generator=MagicMock(),
+    )
+    generator_output: GeneratorOutput = {
+        "prompt_token_ids": [[1]] * 4,
+        "response_ids": [[2]] * 4,
+        "rewards": [1.0, 1.0, 1.0, 0.0],
+        "loss_masks": [[1]] * 4,
+        "stop_reasons": ["stop"] * 4,
+        "rollout_metrics": None,
+    }
+
+    result, _ = trainer.postprocess_generator_output(generator_output, ["a", "a", "b", "b"])
+
+    assert trainer.all_metrics["reward/num_zero_variance_groups"] == 1
+    assert "reward/num_zero_variance_filtered" not in trainer.all_metrics
+    assert result["loss_masks"] == [[1]] * 4
+
+
+def test_zero_variance_groups_include_metrics_superset():
+    """Fully-async dropped groups remain visible through the complete metrics view."""
+    config = create_config(2)
+    config.trainer.algorithm.zero_variance_filter = True
+    trainer = RayPPOTrainer(
+        cfg=config,
+        tracker=None,
+        tokenizer=None,
+        train_dataset=DummyDataset(),
+        eval_dataset=None,
+        inference_engine_client=None,
+        generator=MagicMock(),
+    )
+    train_output: GeneratorOutput = {
+        "prompt_token_ids": [[1]] * 2,
+        "response_ids": [[2]] * 2,
+        "rewards": [1.0, 0.0],
+        "loss_masks": [[1]] * 2,
+        "stop_reasons": ["stop"] * 2,
+        "rollout_metrics": None,
+    }
+    metrics_output: GeneratorOutput = {
+        "prompt_token_ids": [[1]] * 4,
+        "response_ids": [[2]] * 4,
+        "rewards": [1.0, 0.0, 0.0, 0.0],
+        "loss_masks": [[1]] * 4,
+        "stop_reasons": ["stop"] * 4,
+        "rollout_metrics": None,
+    }
+
+    result, _ = trainer.postprocess_generator_output(
+        train_output,
+        ["kept", "kept"],
+        metrics_generator_output=metrics_output,
+        metrics_uids=["kept", "kept", "dropped", "dropped"],
+    )
+
+    assert trainer.all_metrics["reward/num_zero_variance_groups"] == 1
+    assert trainer.all_metrics["reward/num_zero_variance_filtered"] == 0
+    assert result["loss_masks"] == [[1], [1]]
+
+
+def test_zero_variance_groups_logged_with_filtering():
+    """The diagnostic agrees with the existing filtering metric and behavior."""
+    config = create_config(4)
+    config.trainer.algorithm.zero_variance_filter = True
+    trainer = RayPPOTrainer(
+        cfg=config,
+        tracker=None,
+        tokenizer=None,
+        train_dataset=DummyDataset(),
+        eval_dataset=None,
+        inference_engine_client=None,
+        generator=MagicMock(),
+    )
+    generator_output: GeneratorOutput = {
+        "prompt_token_ids": [[1]] * 4,
+        "response_ids": [[2]] * 4,
+        "rewards": [1.0, 1.0, 1.0, 0.0],
+        "loss_masks": [[1]] * 4,
+        "stop_reasons": ["stop"] * 4,
+        "rollout_metrics": None,
+    }
+
+    result, _ = trainer.postprocess_generator_output(generator_output, ["a", "a", "b", "b"])
+
+    assert trainer.all_metrics["reward/num_zero_variance_groups"] == 1
+    assert trainer.all_metrics["reward/num_zero_variance_filtered"] == 1
+    assert result["loss_masks"] == [[0], [0], [1], [1]]
