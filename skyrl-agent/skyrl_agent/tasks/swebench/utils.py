@@ -460,14 +460,20 @@ class SWEBenchTask(BaseTask):
         return MessageAction(content=instruction)
 
     @classmethod
-    def get_config(cls, instance, data_source, agent_config=None, max_iterations=None) -> AppConfig:
+    def get_config(
+        cls, instance, data_source, agent_config=None, max_iterations=None, scoring=False
+    ) -> AppConfig:
         # Configure sandbox
         RUN_WITH_BROWSING = os.environ.get("RUN_WITH_BROWSING", "false").lower() == "true"
         SWE_BENCH_CONTAINER_IMAGE = "ghcr.io/opendevin/eval-swe-bench:full-v1.2.1"
 
         if os.environ.get("USE_INSTANCE_IMAGE", "true").lower() == "true":
             # Use a different instance image for each instance of swe-bench eval
-            base_container_image = get_instance_docker_image(instance, data_source)
+            base_container_image = (
+                get_swebench_scoring_image(instance)
+                if scoring and data_source == "swe-bench"
+                else get_instance_docker_image(instance, data_source)
+            )
             logger.info(
                 f"Using instance container image: {base_container_image}. "
                 f"Please make sure this image exists. "
@@ -496,6 +502,8 @@ class SWEBenchTask(BaseTask):
         )
         if agent_config is not None:
             app_config.set_agent_config(agent_config)
+        if scoring:
+            app_config.get_agent_config().enable_jupyter = False
 
         return app_config
 
@@ -750,8 +758,9 @@ class SWEBenchTask(BaseTask):
 
     @classmethod
     async def evaluate_result(cls, instance, run_results, instance_id, trajectory_id, dataset) -> bool:
-        app_config = cls.get_config(instance, dataset)
+        app_config = cls.get_config(instance, dataset, scoring=True)
 
+        runtime = None
         try:
             # Create runtime
             # TODO(csy): some tasks may not need a runtime for evaluation
@@ -765,9 +774,14 @@ class SWEBenchTask(BaseTask):
             )
         finally:
             logger.info(f"Running cleanup for eval agent task for instance {instance_id}, trajectory {trajectory_id}")
-            if "runtime" in locals() and runtime:
-                runtime.event_stream.close()
-                runtime.close()
+            if runtime:
+                try:
+                    runtime.close()
+                except Exception as cleanup_error:
+                    logger.warning(
+                        f"Failed to clean up eval runtime for instance {instance_id}, "
+                        f"trajectory {trajectory_id}: {cleanup_error}"
+                    )
         return eval_results
 
 
@@ -966,6 +980,12 @@ def get_instance_docker_image(instance, data_source) -> str:
     image_name = "sweb.eval.x86_64." + instance_id
     image_name = image_name.replace("__", "_s_")  # to comply with docker image naming convention
     return (DOCKER_IMAGE_PREFIX.rstrip("/") + "/" + image_name).lower()
+
+
+def get_swebench_scoring_image(instance) -> str:
+    instance_id = instance["instance_id"]
+    image_name = f"sweb.eval.x86_64.{instance_id}".replace("__", "_1776_")
+    return f"swebench/{image_name}".lower()
 
 
 # Helper function for sandbox config

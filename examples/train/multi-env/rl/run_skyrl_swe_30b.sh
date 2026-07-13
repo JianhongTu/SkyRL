@@ -55,7 +55,7 @@ MODEL=${MODEL:-/data/tovi/exports/skyrl_sft_openhands_hf_harnessprompt/global_st
 # DATA_DIR at a local parquet dir holding train.parquet / validation.parquet.
 DATA_DIR=${DATA_DIR:-/home/tovi/data/r2e-all}
 TRAIN_DATA="${DATA_DIR}/train.parquet"
-VAL_DATA="${DATA_DIR}/validation.parquet"
+VAL_DATA=${VAL_DATA:-"${DATA_DIR}/validation.parquet"}
 
 # --- outputs: MUST be on /data (27TB instance-store RAID0), NOT the root/EBS -----
 # EVERYTHING that writes to disk derives from these two paths, so keeping both on
@@ -72,6 +72,7 @@ EXPORT_DIR=${EXPORT_DIR:-/data/tovi/exports/skyrl_rl_swe_hf}
 # steps: eval every 10 -> ~14 evals; ckpt every 20 -> ~7 writes, of which only
 # MAX_CKPTS=1 newest is kept on disk.
 EVAL_INTERVAL=${EVAL_INTERVAL:-10}
+EVAL_BEFORE_TRAIN=${EVAL_BEFORE_TRAIN:-false}
 CKPT_INTERVAL=${CKPT_INTERVAL:-20}
 MAX_CKPTS=${MAX_CKPTS:-1}
 
@@ -203,7 +204,7 @@ fi
   trainer.epochs=1 \
   trainer.seed=$seed \
   trainer.eval_batch_size=128 \
-  trainer.eval_before_train=false \
+  trainer.eval_before_train=$EVAL_BEFORE_TRAIN \
   trainer.eval_interval=$EVAL_INTERVAL \
   trainer.update_epochs_per_batch=1 \
   trainer.train_batch_size=$BATCH_SIZE \

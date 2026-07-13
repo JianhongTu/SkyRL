@@ -51,7 +51,9 @@ def test_rl_recipe_enforces_validated_runtime_limits():
     assert 'mktemp "$_d/.skyrl-write-test.XXXXXX"' in launcher
     assert "BATCH_SIZE=${BATCH_SIZE:-32}" in launcher
     assert "EVAL_INTERVAL=${EVAL_INTERVAL:-10}" in launcher
+    assert "EVAL_BEFORE_TRAIN=${EVAL_BEFORE_TRAIN:-false}" in launcher
     assert "CKPT_INTERVAL=${CKPT_INTERVAL:-20}" in launcher
+    assert 'VAL_DATA=${VAL_DATA:-"${DATA_DIR}/validation.parquet"}' in launcher
 
     smoke_launcher = (
         ROOT / "examples/train/multi-env/rl/run_skyrl_swe_30b_smoke.sh"
@@ -148,6 +150,167 @@ def test_swebench_mounted_runtime_config_from_env():
         assert "SANDBOX_RUNTIME_BUNDLE_HOST_PATH must be set" in str(exc)
     else:
         raise AssertionError("Expected mounted runtime configuration to require a host path")
+
+
+def test_swebench_uses_separate_rollout_and_scoring_images():
+    source_path = ROOT / "skyrl-agent/skyrl_agent/tasks/swebench/utils.py"
+    source = source_path.read_text()
+    tree = ast.parse(source, filename=str(source_path))
+    functions = {
+        node.name: node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name in {"get_instance_docker_image", "get_swebench_scoring_image"}
+    }
+    namespace = {"DOCKER_IMAGE_PREFIX": "docker.io/xingyaoww/"}
+    exec(
+        compile(
+            ast.Module(body=list(functions.values()), type_ignores=[]),
+            str(source_path),
+            "exec",
+        ),
+        namespace,
+    )
+    instance = {"instance_id": "astropy__astropy-13033"}
+
+    assert namespace["get_instance_docker_image"](instance, "swe-bench") == (
+        "docker.io/xingyaoww/sweb.eval.x86_64.astropy_s_astropy-13033"
+    )
+    assert namespace["get_swebench_scoring_image"](instance) == (
+        "swebench/sweb.eval.x86_64.astropy_1776_astropy-13033"
+    )
+
+
+def test_swebench_disables_jupyter_only_for_scoring():
+    source_path = ROOT / "skyrl-agent/skyrl_agent/tasks/swebench/utils.py"
+    tree = ast.parse(source_path.read_text(), filename=str(source_path))
+    class_node = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "SWEBenchTask"
+    )
+    method_node = next(
+        node
+        for node in class_node.body
+        if isinstance(node, ast.FunctionDef) and node.name == "get_config"
+    )
+
+    class AppConfig:
+        def __init__(self, **_kwargs):
+            self.agent_config = SimpleNamespace(enable_jupyter=True)
+
+        def get_agent_config(self):
+            return self.agent_config
+
+        def set_agent_config(self, agent_config):
+            self.agent_config = agent_config
+
+    class SandboxConfig(SimpleNamespace):
+        pass
+
+    minimal_class = ast.ClassDef(
+        name="SWEBenchTask",
+        bases=[],
+        keywords=[],
+        body=[method_node],
+        decorator_list=[],
+    )
+    ast.fix_missing_locations(minimal_class)
+    namespace = {
+        "AppConfig": AppConfig,
+        "get_default_sandbox_config_for_eval": SandboxConfig,
+        "get_instance_docker_image": lambda _instance, _source: "rollout-image",
+        "get_swebench_scoring_image": lambda _instance: "scoring-image",
+        "logger": SimpleNamespace(info=lambda *_args, **_kwargs: None),
+        "os": SimpleNamespace(environ={"USE_INSTANCE_IMAGE": "true"}),
+    }
+    exec(
+        compile(
+            ast.Module(body=[minimal_class], type_ignores=[]),
+            str(source_path),
+            "exec",
+        ),
+        namespace,
+    )
+
+    rollout_config = namespace["SWEBenchTask"].get_config({}, "swe-bench")
+    scoring_config = namespace["SWEBenchTask"].get_config({}, "swe-bench", scoring=True)
+
+    assert rollout_config.get_agent_config().enable_jupyter is True
+    assert scoring_config.get_agent_config().enable_jupyter is False
+
+
+def test_swebench_evaluator_cleanup_preserves_startup_error():
+    source_path = ROOT / "skyrl-agent/skyrl_agent/tasks/swebench/utils.py"
+    tree = ast.parse(source_path.read_text(), filename=str(source_path))
+    class_node = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "SWEBenchTask"
+    )
+    method_node = next(
+        node
+        for node in class_node.body
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "evaluate_result"
+    )
+
+    class Runtime:
+        def __init__(self):
+            self.close_attempted = False
+            self.event_stream = SimpleNamespace(close=lambda: None)
+
+        async def connect(self):
+            raise RuntimeError("startup failed")
+
+        def close(self):
+            self.close_attempted = True
+            raise RuntimeError("cleanup failed")
+
+    runtime = Runtime()
+
+    class Logger:
+        def info(self, *_args, **_kwargs):
+            pass
+
+        def warning(self, *_args, **_kwargs):
+            pass
+
+    minimal_class = ast.ClassDef(
+        name="SWEBenchTask",
+        bases=[],
+        keywords=[],
+        body=[method_node],
+        decorator_list=[],
+    )
+    ast.fix_missing_locations(minimal_class)
+    namespace = {
+        "create_runtime": lambda _config: runtime,
+        "logger": Logger(),
+    }
+    exec(
+        compile(
+            ast.Module(body=[minimal_class], type_ignores=[]),
+            str(source_path),
+            "exec",
+        ),
+        namespace,
+    )
+    namespace["SWEBenchTask"].get_config = classmethod(
+        lambda _cls, _instance, _dataset, scoring=False: SimpleNamespace(scoring=scoring)
+    )
+
+    with pytest.raises(RuntimeError, match="startup failed"):
+        asyncio.run(
+            namespace["SWEBenchTask"].evaluate_result(
+                instance={},
+                run_results={},
+                instance_id="issue",
+                trajectory_id=0,
+                dataset="swe-bench",
+            )
+        )
+
+    assert runtime.close_attempted
 
 
 def test_generator_validation_accepts_missing_per_sample_logprobs():
