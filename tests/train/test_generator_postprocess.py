@@ -92,6 +92,33 @@ def test_response_level_rewards():
     assert result["rewards"] == [[0.0, 1.0], [0.0, 0.0, 0.5]]
 
 
+def test_response_level_rewards_allow_empty_response():
+    config = create_config(2)
+    config.generator.inference_engine.enable_ray_prometheus_stats = False
+    trainer = RayPPOTrainer(
+        cfg=config,
+        tracker=None,
+        tokenizer=None,
+        train_dataset=DummyDataset(),
+        eval_dataset=None,
+        inference_engine_client=None,
+        generator=MagicMock(),
+    )
+    generator_output: GeneratorOutput = {
+        "prompt_token_ids": [[1, 2], [3, 4]],
+        "response_ids": [[], [5, 6]],
+        "rewards": [0.0, 1.0],
+        "loss_masks": [[], [1, 1]],
+        "stop_reasons": ["stop", "stop"],
+        "rollout_metrics": None,
+    }
+
+    result, result_uids = trainer.postprocess_generator_output(generator_output, ["uid1", "uid2"])
+
+    assert result_uids == ["uid1", "uid2"]
+    assert result["rewards"] == [[], [0.0, 1.0]]
+
+
 def test_token_level_rewards():
     """Test postprocess_generator_output with token-level rewards (List[List[float]])."""
 

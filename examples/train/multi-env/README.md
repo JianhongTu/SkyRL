@@ -60,6 +60,7 @@ temp does NOT fix issue 1).
   aligned to the rollout harness.
 - **Pipeline** ([`sft/`](./sft)): `prepare_openhands.py` → `generate_sft.py` →
   `filter_by_length.py` → `run_sft_megatron_openhands.sh`.
+- **Checkpoint caution:** HF exports must use `<|im_end|>` (ID `151645`) as the primary EOS in `tokenizer_config.json`, `config.json`, and `generation_config.json`; leaving the pretraining EOS (`151643`) causes rollouts to ignore assistant turn boundaries and run to `max_tokens`.
 
 ---
 
@@ -110,9 +111,15 @@ Two phases use **two different image families** (see parity note).
   [`rl/skyrl_swe_30b.yaml`](./rl/skyrl_swe_30b.yaml). Tools match the SFT set
   (`enable_think=true`, `enable_search=false`). Rollouts run on the **remote runtime**
   (`SANDBOX_REMOTE_RUNTIME_API_URL`), not the GPU box.
+- **Remote runtime connection (canonical):** configure the GPU client through
+  the repo-root `.env`, following `skyrl-agent/.env.template`:
+  `ALLHANDS_API_KEY=<shared-key>` and
+  `SANDBOX_REMOTE_RUNTIME_API_URL=http://<cpu-box>:3000`. The recipe validates this file and
+  forwards both values to Ray workers. Do not use `SANDBOX_API_KEY`, `OPENHANDS_API_KEY`, task
+  YAML, or ad-hoc shell exports for the client connection; server-side configuration is separate.
 - **Scale:** train = **4,578 instances across 10 repos** (pandas 1444, numpy 781, pillow 620,
   orange3 482, aiohttp 299, tornado 261, scrapy 215, pyramid 189, datalad 179, coveragepy 108).
-  At `train_batch_size=32`, `n_samples_per_prompt=8`: ~144 steps/epoch, ~37k trajectories/epoch.
+  At `train_batch_size=64`, `n_samples_per_prompt=8`: ~72 steps/epoch, ~37k trajectories/epoch.
 - **Image storage:** ~1.2–2.6 GB/image, **full set ≈ 7 TB** (pandas+orange3+numpy+pillow = ~81%).
   Can't bulk pre-pull on a 4 TB disk → **expand disk, subset, or on-demand-pull + LRU evict.** A
   training run needs its instances' images pre-pulled AND the train parquet filtered to that subset.
@@ -154,7 +161,6 @@ confirms the hermes `OHCodeActAgent` emits `<tool_call>` (not `<function>`) and 
 
 ```bash
 cd examples/train/multi-env/rl
-SANDBOX_REMOTE_RUNTIME_API_URL=http://<cpu-box>:3000 OPENHANDS_API_KEY=<k> SANDBOX_API_KEY=<k> \
 SMOKE_API_URL=http://<vllm-host>:8010 SMOKE_MODEL_NAME=sft \
-uv run --isolated python smoke_rollout.py
+uv run --isolated --env-file "$(git rev-parse --show-toplevel)/.env" python smoke_rollout.py
 ```

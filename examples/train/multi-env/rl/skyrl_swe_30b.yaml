@@ -54,28 +54,28 @@ generator:
     min_tokens: 1
     skip_special_tokens: true
     include_stop_str_in_output: true
-    temperature: 0.6
+    temperature: 1.0
     top_p: 0.95
     min_p: 0.0
     top_k: -1
     max_tokens: 2048
     repetition_penalty: 1.0
     logprobs: 1
-    stop: null
+    stop: ["</tool_call>"]
   val_config:
     num_trajectories: 1
     sampling_params:
       min_tokens: 1
       skip_special_tokens: true
       include_stop_str_in_output: true
-      temperature: 0.6
+      temperature: 1.0
       top_p: 0.95
       min_p: 0.0
       top_k: -1
       max_tokens: 2048
       repetition_penalty: 1.0
       logprobs: 1
-      stop: null
+      stop: ["</tool_call>"]
   remove_think_tokens: false
   vision_is_active: false
   # acc-thinking template: matches our SFT (World A / KEEP reasoning). See
@@ -87,10 +87,10 @@ dispatcher:
   type: async_pipeline
   scheduler: naive
   # Validated against the remote runtime. At 96, runtime initialization was
-  # unstable; 32 with the raised nofile limit completed without descriptor or
-  # runtime-service instability.
-  max_parallel_agents: 32
-  max_eval_parallel_agents: 32
+  # unstable; increase the validated 32-agent setting modestly to 48 while
+  # retaining the raised nofile limit.
+  max_parallel_agents: 48
+  max_eval_parallel_agents: 48
   val_config:
-    max_parallel_agents: 32
-    max_eval_parallel_agents: 32
+    max_parallel_agents: 48
+    max_eval_parallel_agents: 48

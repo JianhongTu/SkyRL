@@ -570,6 +570,30 @@ class AgentRunner:
         avg_turn_assistant = (sum(num_turns) / len(num_turns)) if len(num_turns) > 0 else 0.0
         rollout_metrics["rollout_metrics/avg_turn_assistant"] = avg_turn_assistant
 
+        reward_groups = {
+            "finish_tool": "FINISH_TOOL",
+            "truncated_response": "TRUNCATED_RESPONSE",
+            "context_budget_reached": "CONTEXT_BUDGET_REACHED",
+        }
+        for metric_name, finish_reason in reward_groups.items():
+            grouped_rewards = [
+                reward
+                for reward, reason in zip(resolved_list, finish_reason_list)
+                if reason == finish_reason
+            ]
+            reward_sum = sum(grouped_rewards)
+            positive_reward_count = sum(reward > 0 for reward in grouped_rewards)
+            trajectory_count = len(grouped_rewards)
+            rollout_metrics[f"rollout_metrics/reward_sum/{metric_name}"] = reward_sum
+            rollout_metrics[f"rollout_metrics/positive_reward_count/{metric_name}"] = positive_reward_count
+            rollout_metrics[f"rollout_metrics/trajectory_count/{metric_name}"] = trajectory_count
+            rollout_metrics[f"rollout_metrics/reward_mean/{metric_name}"] = (
+                reward_sum / trajectory_count if trajectory_count else 0.0
+            )
+            rollout_metrics[f"rollout_metrics/positive_reward_rate/{metric_name}"] = (
+                positive_reward_count / trajectory_count if trajectory_count else 0.0
+            )
+
         # Note: no backward-compat key kept (removed per request)
 
         total_per_instance = defaultdict(int)

@@ -21,6 +21,7 @@ ENV_FILE="$REPO/.env"
 DATA_DIR=/home/tovi/data/nemotron_sft_swe_v3_openhands_sft_harnessprompt_intact32k
 DATASET_ROWS=7916
 NUM_STEPS=496  # 2 * ceil(7916 / batch_size 32): exactly two intact-only epochs
+WARMUP_STEPS=25  # ~5% of this shorter run
 
 CKPT_PATH=/data/tovi/ckpts/skyrl_sft_openhands_harnessprompt_intact
 EXPORT_PATH=/data/tovi/exports/skyrl_sft_openhands_hf_harnessprompt_intact
@@ -83,6 +84,7 @@ docker exec -e WANDB_API_KEY "$CONTAINER" bash -lc "
   export DATA_DIR='$DATA_DIR'
   export DATASET_ROWS='$DATASET_ROWS'
   export NUM_STEPS='$NUM_STEPS'
+  export WARMUP_STEPS='$WARMUP_STEPS'
   export CKPT_PATH='$CKPT_PATH'
   export EXPORT_PATH='$EXPORT_PATH'
   export MODEL_PATH='$MODEL_PATH'

@@ -317,6 +317,23 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput], step
             rollout_metrics[k] = max(values)
         else:
             rollout_metrics[k] = sum(values)
+
+    count_prefix = "rollout_metrics/trajectory_count/"
+    for count_key in (key for key in extra_keys if key.startswith(count_prefix)):
+        metric_name = count_key.removeprefix(count_prefix)
+        reward_sum_key = f"rollout_metrics/reward_sum/{metric_name}"
+        positive_count_key = f"rollout_metrics/positive_reward_count/{metric_name}"
+        if reward_sum_key not in extra_keys or positive_count_key not in extra_keys:
+            continue
+        trajectory_count = sum(extra_keys[count_key])
+        reward_sum = sum(extra_keys[reward_sum_key])
+        positive_count = sum(extra_keys[positive_count_key])
+        rollout_metrics[f"rollout_metrics/reward_mean/{metric_name}"] = (
+            reward_sum / trajectory_count if trajectory_count else 0.0
+        )
+        rollout_metrics[f"rollout_metrics/positive_reward_rate/{metric_name}"] = (
+            positive_count / trajectory_count if trajectory_count else 0.0
+        )
     result["rollout_metrics"] = rollout_metrics
 
     # Validate the generator output using the number of prompts

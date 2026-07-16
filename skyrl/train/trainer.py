@@ -1084,7 +1084,8 @@ class RayPPOTrainer:
             # Response-level rewards: rewards is List[float], convert to per-token rewards
             for reward, response in zip(rewards, responses):
                 per_token_reward = [0.0] * len(response)
-                per_token_reward[-1] = float(reward)
+                if response:
+                    per_token_reward[-1] = float(reward)
                 per_token_rewards.append(per_token_reward)
 
         n_samples_per_prompt = self.cfg.generator.n_samples_per_prompt

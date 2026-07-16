@@ -15,6 +15,108 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_eval_only_disables_colocation_before_starting_inference():
+    launcher = (
+        ROOT / "examples/train/multi-env/rl/run_skyrl_swe_30b.sh"
+    ).read_text()
+
+    assert "COLOCATE_ALL=true" in launcher
+    assert re.search(
+        r'if \[ "\$EVAL_ONLY" = "true" \]; then\s+'
+        r'ENTRYPOINT=\(rl_eval_entry\.py\)\s+'
+        r'COLOCATE_ALL=false\s+fi',
+        launcher,
+    )
+    assert "trainer.placement.colocate_all=$COLOCATE_ALL" in launcher
+
+    eval_entrypoint = (
+        ROOT / "examples/train/multi-env/rl/rl_eval_entry.py"
+    ).read_text()
+    assert "if cfg.trainer.placement.colocate_all:" in eval_entrypoint
+    assert "Eval-only requires trainer.placement.colocate_all=false" in eval_entrypoint
+
+
+def test_rl_launcher_moves_openhands_file_store_off_tmp():
+    launcher = (
+        ROOT / "examples/train/multi-env/rl/run_skyrl_swe_30b.sh"
+    ).read_text()
+
+    assert (
+        "export OPENHANDS_FILE_STORE_PATH=${OPENHANDS_FILE_STORE_PATH:-"
+        "/data/tovi/openhands_file_store}"
+    ) in launcher
+
+
+def test_multi_env_rl_uses_uniform_temperature():
+    launcher = (
+        ROOT / "examples/train/multi-env/rl/run_skyrl_swe_30b.sh"
+    ).read_text()
+    assert "generator.sampling_params.temperature=${TEMP:-1.0}" in launcher
+    assert "generator.eval_sampling_params.temperature=${EVAL_TEMP:-1.0}" in launcher
+
+    task_config = (
+        ROOT / "examples/train/multi-env/rl/skyrl_swe_30b.yaml"
+    ).read_text()
+    assert len(re.findall(r"^    temperature: 1\.0$", task_config, re.MULTILINE)) == 1
+    assert len(re.findall(r"^      temperature: 1\.0$", task_config, re.MULTILINE)) == 1
+
+
+def test_multi_env_rl_defaults_to_final_intact_sft_checkpoint():
+    launcher = (
+        ROOT / "examples/train/multi-env/rl/run_skyrl_swe_30b.sh"
+    ).read_text()
+
+    assert (
+        "MODEL=${MODEL:-/data/tovi/exports/"
+        "skyrl_sft_openhands_hf_harnessprompt_intact/global_step_496/policy}"
+        in launcher
+    )
+
+    wrapper = (
+        ROOT / "examples/train/multi-env/run_rl_recipe.sh"
+    ).read_text()
+    assert (
+        "MODEL=/data/tovi/exports/"
+        "skyrl_sft_openhands_hf_harnessprompt_intact/global_step_496/policy"
+        in wrapper
+    )
+
+
+def test_multi_env_rl_defaults_to_repo_env_file():
+    launcher = (
+        ROOT / "examples/train/multi-env/rl/run_skyrl_swe_30b.sh"
+    ).read_text()
+
+    assert "ENV_FILE=${ENV_FILE:-$REPO/.env}" in launcher
+
+    wrapper = (
+        ROOT / "examples/train/multi-env/run_rl_recipe.sh"
+    ).read_text()
+    assert 'ENV_FILE="$REPO/.env"' in wrapper
+    assert '$RL_DIR/.env' not in wrapper
+
+    readme = (ROOT / "examples/train/multi-env/README.md").read_text()
+    assert '--env-file "$(git rev-parse --show-toplevel)/.env"' in readme
+
+
+def test_multi_env_rl_defaults_to_prebuilt_venv():
+    launcher = (
+        ROOT / "examples/train/multi-env/rl/run_skyrl_swe_30b.sh"
+    ).read_text()
+
+    assert 'if [ "${USE_PREBUILT_VENV:-1}" = "1" ]; then' in launcher
+    assert "unset RAY_RUNTIME_ENV_HOOK" in launcher
+    assert 'LAUNCH=("$RL_DIR/.venv/bin/python" "${ENTRYPOINT[@]}")' in launcher
+
+
+def test_multi_env_rl_defaults_to_64_prompt_batch():
+    launcher = (
+        ROOT / "examples/train/multi-env/rl/run_skyrl_swe_30b.sh"
+    ).read_text()
+
+    assert "BATCH_SIZE=${BATCH_SIZE:-64}" in launcher
+
+
 def test_multi_env_rl_uses_native_context_window_split():
     prompt_tokens = 30_720
     generation_tokens = 2_048
@@ -27,6 +129,11 @@ def test_multi_env_rl_uses_native_context_window_split():
         source = (ROOT / relative_path).read_text()
         assert re.search(r"^  max_prompt_length: 30720$", source, re.MULTILINE)
         assert len(re.findall(r"^\s+max_tokens: 2048$", source, re.MULTILINE)) == 2
+
+    task_config = (
+        ROOT / "examples/train/multi-env/rl/skyrl_swe_30b.yaml"
+    ).read_text()
+    assert task_config.count('stop: ["</tool_call>"]') == 2
 
     launcher = (
         ROOT / "examples/train/multi-env/rl/run_skyrl_swe_30b.sh"
@@ -49,7 +156,6 @@ def test_rl_recipe_enforces_validated_runtime_limits():
     assert "NOFILE_LIMIT=${NOFILE_LIMIT:-524288}" in launcher
     assert 'ulimit -n "$NOFILE_LIMIT"' in launcher
     assert 'mktemp "$_d/.skyrl-write-test.XXXXXX"' in launcher
-    assert "BATCH_SIZE=${BATCH_SIZE:-32}" in launcher
     assert "EVAL_INTERVAL=${EVAL_INTERVAL:-10}" in launcher
     assert "EVAL_BEFORE_TRAIN=${EVAL_BEFORE_TRAIN:-false}" in launcher
     assert "CKPT_INTERVAL=${CKPT_INTERVAL:-20}" in launcher
@@ -196,7 +302,8 @@ def test_swebench_disables_jupyter_only_for_scoring():
     )
 
     class AppConfig:
-        def __init__(self, **_kwargs):
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
             self.agent_config = SimpleNamespace(enable_jupyter=True)
 
         def get_agent_config(self):
@@ -222,7 +329,12 @@ def test_swebench_disables_jupyter_only_for_scoring():
         "get_instance_docker_image": lambda _instance, _source: "rollout-image",
         "get_swebench_scoring_image": lambda _instance: "scoring-image",
         "logger": SimpleNamespace(info=lambda *_args, **_kwargs: None),
-        "os": SimpleNamespace(environ={"USE_INSTANCE_IMAGE": "true"}),
+        "os": SimpleNamespace(
+            environ={
+                "USE_INSTANCE_IMAGE": "true",
+                "OPENHANDS_FILE_STORE_PATH": "/data/tovi/openhands_file_store",
+            }
+        ),
     }
     exec(
         compile(
@@ -238,6 +350,8 @@ def test_swebench_disables_jupyter_only_for_scoring():
 
     assert rollout_config.get_agent_config().enable_jupyter is True
     assert scoring_config.get_agent_config().enable_jupyter is False
+    assert rollout_config.kwargs["file_store_path"] == "/data/tovi/openhands_file_store"
+    assert scoring_config.kwargs["file_store_path"] == "/data/tovi/openhands_file_store"
 
 
 def test_swebench_evaluator_cleanup_preserves_startup_error():
@@ -531,15 +645,16 @@ def test_native_model_budget_uses_full_encoded_input_length():
     assert helpers.remaining_generation_tokens(33_000, 32_768) == 0
 
 
-def test_context_terminals_preserve_valid_prefixes():
+def test_context_terminal_masking_policy():
     helpers = _load_module(
         "rollout_context_terminal_utils",
         "skyrl-agent/skyrl_agent/agents/rollout_diagnostic_utils.py",
     )
 
-    for reason in ("CONTEXT_BUDGET_REACHED", "TRUNCATED_RESPONSE"):
-        assert reason in helpers.NON_FINISH_TERMINAL_REASONS
-        assert reason not in helpers.MASK_OUT_REASONS
+    assert "CONTEXT_BUDGET_REACHED" in helpers.NON_FINISH_TERMINAL_REASONS
+    assert "CONTEXT_BUDGET_REACHED" not in helpers.MASK_OUT_REASONS
+    assert "TRUNCATED_RESPONSE" in helpers.NON_FINISH_TERMINAL_REASONS
+    assert "TRUNCATED_RESPONSE" in helpers.MASK_OUT_REASONS
 
 
 @pytest.mark.parametrize(
@@ -921,6 +1036,16 @@ def test_postprocess_keeps_cap_signal_and_separates_finish_bonus():
     assert output["trajectory_records"][3]["finish_reason"] == (
         "CONTEXT_WINDOW_EXCEEDED"
     )
+    rollout_metrics = output["rollout_metrics"]
+    assert rollout_metrics["rollout_metrics/reward_mean/finish_tool"] == 0.0
+    assert rollout_metrics["rollout_metrics/positive_reward_rate/finish_tool"] == 0.0
+    assert rollout_metrics["rollout_metrics/reward_sum/finish_tool"] == 0.0
+    assert rollout_metrics["rollout_metrics/positive_reward_count/finish_tool"] == 0
+    assert rollout_metrics["rollout_metrics/trajectory_count/finish_tool"] == 1
+    assert rollout_metrics["rollout_metrics/reward_mean/truncated_response"] == 0.0
+    assert rollout_metrics["rollout_metrics/positive_reward_rate/truncated_response"] == 0.0
+    assert rollout_metrics["rollout_metrics/reward_mean/context_budget_reached"] == 0.0
+    assert rollout_metrics["rollout_metrics/positive_reward_rate/context_budget_reached"] == 0.0
 
     legacy_runner = SimpleNamespace(
         cfg=SimpleNamespace(
@@ -991,10 +1116,22 @@ def test_postprocess_keeps_cap_signal_and_separates_finish_bonus():
     )
 
     assert prefix_output["response_ids"] == [[12], [22, 23, 24, 25]]
-    assert prefix_output["loss_masks"] == [[1.0], [1.0, 0.0, 0.0, 0.0]]
+    assert prefix_output["loss_masks"] == [[1.0], [0, 0, 0, 0]]
     assert [
         record["finish_reason"] for record in prefix_output["trajectory_records"]
     ] == ["CONTEXT_BUDGET_REACHED", "TRUNCATED_RESPONSE"]
+    rollout_metrics = prefix_output["rollout_metrics"]
+    assert rollout_metrics["rollout_metrics/num_mask_out"] == 1
+    assert rollout_metrics["rollout_metrics/num_mask_non_zero_reward"] == 1
+    assert rollout_metrics["rollout_metrics/reward_mean/finish_tool"] == 0.0
+    assert rollout_metrics["rollout_metrics/positive_reward_rate/finish_tool"] == 0.0
+    assert rollout_metrics["rollout_metrics/reward_mean/truncated_response"] == 1.0
+    assert rollout_metrics["rollout_metrics/positive_reward_rate/truncated_response"] == 1.0
+    assert rollout_metrics["rollout_metrics/reward_sum/truncated_response"] == 1.0
+    assert rollout_metrics["rollout_metrics/positive_reward_count/truncated_response"] == 1
+    assert rollout_metrics["rollout_metrics/trajectory_count/truncated_response"] == 1
+    assert rollout_metrics["rollout_metrics/reward_mean/context_budget_reached"] == 1.0
+    assert rollout_metrics["rollout_metrics/positive_reward_rate/context_budget_reached"] == 1.0
 
 
 def test_inline_evaluation_propagates_finish_reason():

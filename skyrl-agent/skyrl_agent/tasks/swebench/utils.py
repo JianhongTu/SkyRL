@@ -495,6 +495,7 @@ class SWEBenchTask(BaseTask):
         app_config = AppConfig(
             run_as_openhands=False,
             runtime="remote",
+            file_store_path=os.environ.get("OPENHANDS_FILE_STORE_PATH", "/tmp/openhands_file_store"),
             sandbox=sandbox_config,
             workspace_base=None,
             workspace_mount_path=None,

@@ -19,9 +19,9 @@ set -euo pipefail
 REPO=/home/tovi/SkyRL
 CONTAINER=skyrl-mega
 RL_DIR="$REPO/examples/train/multi-env/rl"
-ENV_FILE="$RL_DIR/.env"
+ENV_FILE="$REPO/.env"
 
-MODEL=/data/tovi/exports/skyrl_sft_openhands_hf_harnessprompt/global_step_1084/policy
+MODEL=/data/tovi/exports/skyrl_sft_openhands_hf_harnessprompt_intact/global_step_496/policy
 DATA_DIR=/home/tovi/data/r2e-all
 TASK_YAML="$RL_DIR/skyrl_swe_30b.yaml"
 

@@ -708,6 +708,10 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
             env_vars[var_name] = value
 
     for var_name in [
+        "ALLHANDS_API_KEY",
+        "SANDBOX_API_KEY",
+        "SANDBOX_REMOTE_RUNTIME_API_URL",
+        "OPENHANDS_FILE_STORE_PATH",
         "SANDBOX_RUNTIME_MODE",
         "SANDBOX_RUNTIME_BUNDLE_HOST_PATH",
         "SANDBOX_RUNTIME_BUNDLE_CONTAINER_PATH",

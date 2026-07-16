@@ -7,6 +7,7 @@ from typing import Any
 MASK_OUT_REASONS = frozenset(
     {
         "CONTEXT_WINDOW_EXCEEDED",
+        "TRUNCATED_RESPONSE",
         "error_runtime",
         "error_evaluation",
         "BAD_LLM_RESPONSE",
@@ -15,7 +16,7 @@ MASK_OUT_REASONS = frozenset(
     }
 )
 PREFIX_TRAINABLE_TERMINAL_REASONS = frozenset(
-    {"CONTEXT_BUDGET_REACHED", "TRUNCATED_RESPONSE"}
+    {"CONTEXT_BUDGET_REACHED"}
 )
 NON_FINISH_TERMINAL_REASONS = MASK_OUT_REASONS | {
     "error_initialization",

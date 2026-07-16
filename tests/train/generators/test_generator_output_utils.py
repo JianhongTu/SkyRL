@@ -93,6 +93,42 @@ def test_generator_output_concatenation():
         np.testing.assert_allclose(concatenated_output["rollout_metrics"][key], value)
 
 
+def test_generator_output_concatenation_weights_finish_reason_reward_metrics():
+    def output(rewards, reward_sum, positive_count, trajectory_count=None):
+        sample_count = len(rewards)
+        count = sample_count if trajectory_count is None else trajectory_count
+        return {
+            "prompt_token_ids": [[1]] * sample_count,
+            "response_ids": [[2]] * sample_count,
+            "rewards": rewards,
+            "loss_masks": [[1]] * sample_count,
+            "stop_reasons": ["stop"] * sample_count,
+            "rollout_logprobs": None,
+            "rollout_metrics": {
+                "rollout_metrics/reward_sum/finish_tool": reward_sum,
+                "rollout_metrics/positive_reward_count/finish_tool": positive_count,
+                "rollout_metrics/trajectory_count/finish_tool": count,
+                "rollout_metrics/reward_mean/finish_tool": reward_sum / count if count else 0.0,
+                "rollout_metrics/positive_reward_rate/finish_tool": positive_count / count if count else 0.0,
+            },
+        }
+
+    concatenated = concatenate_generator_outputs(
+        [
+            output([1.0], reward_sum=1.0, positive_count=1),
+            output([1.0, 0.0, 0.0], reward_sum=1.0, positive_count=1),
+            output([0.0, 0.0], reward_sum=0.0, positive_count=0, trajectory_count=0),
+        ]
+    )
+    metrics = concatenated["rollout_metrics"]
+
+    assert metrics["rollout_metrics/reward_sum/finish_tool"] == 2.0
+    assert metrics["rollout_metrics/positive_reward_count/finish_tool"] == 2
+    assert metrics["rollout_metrics/trajectory_count/finish_tool"] == 4
+    assert metrics["rollout_metrics/reward_mean/finish_tool"] == 0.5
+    assert metrics["rollout_metrics/positive_reward_rate/finish_tool"] == 0.5
+
+
 def test_get_metrics_from_generator_output():
     # Per trajectory rewards, where rewards are List[float]
     generator_output: GeneratorOutput = {

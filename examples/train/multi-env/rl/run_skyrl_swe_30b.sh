@@ -39,16 +39,16 @@ fi
 REPO=${REPO:-/home/tovi/SkyRL}
 SKYRL_AGENT_DIR="$REPO/skyrl-agent"
 RL_DIR="$REPO/examples/train/multi-env/rl"
-# Env for the isolated run comes from OUR pyproject + this .env (secrets).
-ENV_FILE=${ENV_FILE:-$RL_DIR/.env}
+# Env for the isolated run comes from OUR pyproject + the repo-root .env (secrets).
+ENV_FILE=${ENV_FILE:-$REPO/.env}
 
 # --- our model: the SFT-exported HF checkpoint (hand-off from the SFT phase) ---
-# Use the HARNESS-PROMPT re-SFT (skyrl_sft_openhands_hf_harnessprompt), NOT the
+# Use the final intact-only HARNESS-PROMPT re-SFT, NOT the
 # original long-prompt SFT — this is the checkpoint the rollout smoke validated
 # and the one aligned to the short system prompt the eval/RL harness actually
 # sends. The HF weights live under the `policy/` subdir. It lives on /data
 # (instance-store: wiped on EC2 stop/start) — copy to /home/tovi to persist.
-MODEL=${MODEL:-/data/tovi/exports/skyrl_sft_openhands_hf_harnessprompt/global_step_1084/policy}
+MODEL=${MODEL:-/data/tovi/exports/skyrl_sft_openhands_hf_harnessprompt_intact/global_step_496/policy}
 
 # --- RL dataset (SWE instances) ------------------------------------------------
 # The reference used r2e-all on shared storage; this host has neither. Point
@@ -67,9 +67,9 @@ VAL_DATA=${VAL_DATA:-"${DATA_DIR}/validation.parquet"}
 CKPT_DIR=${CKPT_DIR:-/data/tovi/ckpts/skyrl_rl_swe}
 EXPORT_DIR=${EXPORT_DIR:-/data/tovi/exports/skyrl_rl_swe_hf}
 
-# --- checkpoint / eval cadence (sized for a ~143-step, 1-epoch run) ------------
-# Space these out so we don't stall training saving a 30B ckpt too often. At 143
-# steps: eval every 10 -> ~14 evals; ckpt every 20 -> ~7 writes, of which only
+# --- checkpoint / eval cadence (sized for a ~72-step, 1-epoch run) -------------
+# Space these out so we don't stall training saving a 30B ckpt too often. At 72
+# steps: eval every 10 -> ~7 evals; ckpt every 20 -> ~3 writes, of which only
 # MAX_CKPTS=1 newest is kept on disk.
 EVAL_INTERVAL=${EVAL_INTERVAL:-10}
 EVAL_BEFORE_TRAIN=${EVAL_BEFORE_TRAIN:-false}
@@ -83,6 +83,7 @@ TASK_YAML=${TASK_YAML:-$REPO/examples/train/multi-env/rl/skyrl_swe_30b.yaml}
 # sandbox are actually constructed.
 export PYTHONPATH="$RL_DIR${PYTHONPATH:+:$PYTHONPATH}"
 export SKYRL_PYTHONPATH_EXPORT=${SKYRL_PYTHONPATH_EXPORT:-1}
+export OPENHANDS_FILE_STORE_PATH=${OPENHANDS_FILE_STORE_PATH:-/data/tovi/openhands_file_store}
 export SANDBOX_RUNTIME_MODE=${SANDBOX_RUNTIME_MODE:-mounted}
 export SANDBOX_RUNTIME_BUNDLE_HOST_PATH=${SANDBOX_RUNTIME_BUNDLE_HOST_PATH:-/opt/openhands-runtime/current}
 export SANDBOX_RUNTIME_BUNDLE_CONTAINER_PATH=${SANDBOX_RUNTIME_BUNDLE_CONTAINER_PATH:-/opt/openhands-runtime}
@@ -94,9 +95,10 @@ NUM_GPUS=${NUM_GPUS:-8}
 NUM_INFERENCE_ENGINES=${NUM_INFERENCE_ENGINES:-2}
 TP_SIZE=${TP_SIZE:-4}          # vLLM tensor-parallel per engine (2*4 = 8)
 SP_SIZE=${SP_SIZE:-4}          # FSDP sequence-parallel for policy/ref
-BATCH_SIZE=${BATCH_SIZE:-32}   # prompts/step (single node; ref used 64 on 2 nodes)
+BATCH_SIZE=${BATCH_SIZE:-64}   # prompts/step; 8 trajectories each = 512 rollouts/step
 LOGGER=${LOGGER:-wandb}
 INFERENCE_BACKEND=${INFERENCE_BACKEND:-vllm}
+EVAL_ONLY=${EVAL_ONLY:-false}
 seed=${seed:-1}
 
 RUN_NAME=${RUN_NAME:-skyrl_rl_swe_qwen3_30b_a3b}
@@ -125,7 +127,7 @@ EPS_CLIP_HIGH=${EPS_CLIP_HIGH:-4e-4}
 if [ ! -d "$MODEL" ]; then
   echo "ERROR: SFT checkpoint not found: $MODEL" >&2
   echo "       Set MODEL=<dir with config.json + weights>. Final SFT export was" >&2
-  echo "       /data/tovi/exports/skyrl_sft_openhands_hf/global_step_1084 (instance-store)." >&2
+  echo "       /data/tovi/exports/skyrl_sft_openhands_hf_harnessprompt_intact/global_step_496/policy (instance-store)." >&2
   exit 1
 fi
 if [ ! -f "$TRAIN_DATA" ]; then
@@ -174,25 +176,30 @@ cd "$RL_DIR"
 # (vllm==0.23.0 / torch==2.11.0 / flash-attn==2.8.3 via prebuilt) and any torch-2.7
 # --with conflicts with it. Let skyrl[fsdp] drive everything (as the smoke did).
 #
-# Launcher: default `uv run --isolated` builds a throwaway venv AND Ray's
-# RAY_RUNTIME_ENV_HOOK replays it for EVERY worker — on this 192-CPU box that means
-# many concurrent uv builds contending on the cache lock, stalling startup past the
-# process-group barrier. Strongly prefer USE_PREBUILT_VENV=1 after building one venv:
-#   cd "$RL_DIR" && uv sync && source .venv/bin/activate && unset RAY_RUNTIME_ENV_HOOK
-# so every Ray worker inherits that single venv (workers use the driver's
-# sys.executable). In prebuilt mode we load $ENV_FILE ourselves (no `uv --env-file`).
-if [ "${USE_PREBUILT_VENV:-0}" = "1" ]; then
+# Launcher: use the prebuilt venv by default. `uv run --isolated` builds a throwaway
+# venv and Ray replays it for every worker, which stalls startup on this 192-CPU box.
+# Set USE_PREBUILT_VENV=0 only when an isolated environment is explicitly needed.
+# In prebuilt mode we load $ENV_FILE ourselves (no `uv --env-file`).
+ENTRYPOINT=(rl_train_entry.py)
+COLOCATE_ALL=true
+if [ "$EVAL_ONLY" = "true" ]; then
+    ENTRYPOINT=(rl_eval_entry.py)
+    COLOCATE_ALL=false
+fi
+
+if [ "${USE_PREBUILT_VENV:-1}" = "1" ]; then
     set -a; . "$ENV_FILE"; set +a
-    LAUNCH=(python rl_train_entry.py)
+    unset RAY_RUNTIME_ENV_HOOK
+    LAUNCH=("$RL_DIR/.venv/bin/python" "${ENTRYPOINT[@]}")
 else
-    LAUNCH=(uv run --isolated --env-file "$ENV_FILE" python rl_train_entry.py)
+    LAUNCH=(uv run --isolated --env-file "$ENV_FILE" python "${ENTRYPOINT[@]}")
 fi
 "${LAUNCH[@]}" \
   data.train_data="['$TRAIN_DATA']" \
   data.val_data="['$VAL_DATA']" \
   trainer.algorithm.advantage_estimator="loop" \
   trainer.policy.model.path="$MODEL" \
-  trainer.placement.colocate_all=true \
+  trainer.placement.colocate_all=$COLOCATE_ALL \
   trainer.strategy=fsdp \
   trainer.placement.policy_num_gpus_per_node=$NUM_GPUS \
   trainer.placement.ref_num_gpus_per_node=$NUM_GPUS \
@@ -215,11 +222,11 @@ fi
   trainer.max_ckpts_to_keep=$MAX_CKPTS \
   trainer.max_prompt_length=${MAX_PROMPT_LEN:-30720} \
   generator.sampling_params.max_generate_length=2048 \
-  generator.sampling_params.temperature=${TEMP:-0.6} \
+  generator.sampling_params.temperature=${TEMP:-1.0} \
   generator.sampling_params.top_p=${TOP_P:-0.95} \
   generator.sampling_params.top_k=-1 \
   generator.eval_sampling_params.max_generate_length=2048 \
-  generator.eval_sampling_params.temperature=${EVAL_TEMP:-0.6} \
+  generator.eval_sampling_params.temperature=${EVAL_TEMP:-1.0} \
   generator.eval_sampling_params.top_p=${EVAL_TOP_P:-0.95} \
   generator.eval_sampling_params.top_k=-1 \
   generator.inference_engine.enforce_eager=false \
