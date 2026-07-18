@@ -25,6 +25,7 @@ from skyrl_agent.agents.rollout_diagnostic_utils import (
     MASK_OUT_REASONS,
     PREFIX_TRAINABLE_TERMINAL_REASONS,
     apply_finish_reward_bonus,
+    has_repetitive_assistant_turn,
     normalize_finish_reason,
 )
 from .mapping import AGENT_TRAJECTORY_REGISTRY
@@ -466,6 +467,7 @@ class AgentRunner:
         truncated_masks = []
         truncated_logprobs = []
         context_exceeded_traj_ids = set()
+        repetitive_traj_ids = set()
 
         for idx, (ids, mask, logprob, reason) in enumerate(
             zip(response_ids, response_assistant_mask, logprobs, step_finish_reason_list)
@@ -476,6 +478,9 @@ class AgentRunner:
             mask = mask[first_nonzero:]
             if logprob is not None:
                 logprob = logprob[first_nonzero:]
+
+            if has_repetitive_assistant_turn(ids, mask):
+                repetitive_traj_ids.add(traj_idx_list[idx])
 
             if len(ids) > max_response_length:
                 if (
@@ -516,8 +521,14 @@ class AgentRunner:
         logprobs = truncated_logprobs
 
         loss_mask = [
-            [0] * len(mask) if (reason in mask_out_reason) else mask
-            for mask, reason in zip(response_assistant_mask, step_finish_reason_list)
+            [0] * len(mask)
+            if reason in mask_out_reason or traj_id in repetitive_traj_ids
+            else mask
+            for mask, reason, traj_id in zip(
+                response_assistant_mask,
+                step_finish_reason_list,
+                traj_idx_list,
+            )
         ]
 
         loss_mask_nonzero_by_traj = {}
@@ -543,6 +554,7 @@ class AgentRunner:
                     "task_reward": result.get("task_reward", False),
                     "finish_reward_bonus": result.get("finish_reward_bonus", 0.0),
                     "finish_reason": result.get("finish_reason"),
+                    "repetitive_generation": key in repetitive_traj_ids,
                     "loss_mask_nonzero": loss_mask_nonzero_by_traj.get(key),
                     "finish": result.get("finish", False),
                     "error": result.get("error"),
@@ -644,6 +656,17 @@ class AgentRunner:
         rollout_metrics["rollout_metrics/stuck_in_a_loop_ratio"] = sum(
             1 for reason in finish_reason_list if reason == "stuck_in_a_loop"
         ) / len(finish_reason_list)
+        repetitive_generation_count = len(repetitive_traj_ids)
+        repetition_checked_trajectory_count = len(finish_reason_list)
+        rollout_metrics["rollout_metrics/repetitive_generation_count"] = (
+            repetitive_generation_count
+        )
+        rollout_metrics[
+            "rollout_metrics/repetition_checked_trajectory_count"
+        ] = repetition_checked_trajectory_count
+        rollout_metrics["rollout_metrics/repetitive_generation_ratio"] = (
+            repetitive_generation_count / repetition_checked_trajectory_count
+        )
         rollout_metrics["rollout_metrics/error_runtime"] = sum(
             1 for reason in finish_reason_list if reason == "error_runtime"
         ) / len(finish_reason_list)

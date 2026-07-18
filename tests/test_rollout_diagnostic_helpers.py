@@ -633,6 +633,82 @@ def test_generation_limit_preserves_configured_cap():
     assert helpers.bounded_max_tokens(configured=4000, remaining=2500) == 2500
 
 
+def test_repetition_detection_finds_intermediate_assistant_turn():
+    helpers = _load_module(
+        "rollout_repetition_utils",
+        "skyrl-agent/skyrl_agent/agents/rollout_diagnostic_utils.py",
+    )
+    repeated_turn = [101, 102] * 70 + [2]
+    tool_observation = [201, 202] * 80
+    final_turn = list(range(300, 380))
+    token_ids = repeated_turn + tool_observation + final_turn
+    assistant_mask = (
+        [1] * len(repeated_turn)
+        + [0] * len(tool_observation)
+        + [1] * len(final_turn)
+    )
+
+    assert helpers.has_repetitive_assistant_turn(token_ids, assistant_mask)
+
+
+def test_repetition_detection_tolerates_small_loop_noise():
+    helpers = _load_module(
+        "rollout_noisy_repetition_utils",
+        "skyrl-agent/skyrl_agent/agents/rollout_diagnostic_utils.py",
+    )
+    repeated_turn = [41, 42] * 70
+    for index in (25, 57, 89, 121):
+        repeated_turn[index] = 99
+
+    assert helpers.has_repetitive_assistant_turn(
+        repeated_turn, [1] * len(repeated_turn)
+    )
+
+
+def test_repetition_detection_finds_non_periodic_low_vocabulary_loop():
+    import random
+
+    helpers = _load_module(
+        "rollout_low_vocabulary_repetition_utils",
+        "skyrl-agent/skyrl_agent/agents/rollout_diagnostic_utils.py",
+    )
+    rng = random.Random(7)
+    noisy_loop = [41 + rng.randrange(2) for _ in range(140)]
+
+    assert helpers.has_repetitive_assistant_turn(
+        noisy_loop, [1] * len(noisy_loop)
+    )
+
+
+@pytest.mark.parametrize(
+    ("token_ids", "assistant_mask"),
+    [
+        (list(range(200)), [1] * 200),
+        ([11, 12] * 40, [1] * 80),
+        (list(range(80)) + [11, 12] * 80, [1] * 80 + [0] * 160),
+    ],
+)
+def test_repetition_detection_rejects_normal_short_or_non_assistant_content(
+    token_ids, assistant_mask
+):
+    helpers = _load_module(
+        "rollout_non_repetition_utils",
+        "skyrl-agent/skyrl_agent/agents/rollout_diagnostic_utils.py",
+    )
+
+    assert not helpers.has_repetitive_assistant_turn(token_ids, assistant_mask)
+
+
+def test_repetition_detection_requires_aligned_tokens_and_mask():
+    helpers = _load_module(
+        "rollout_repetition_alignment_utils",
+        "skyrl-agent/skyrl_agent/agents/rollout_diagnostic_utils.py",
+    )
+
+    with pytest.raises(ValueError, match="same length"):
+        helpers.has_repetitive_assistant_turn([1, 2], [1])
+
+
 def test_native_model_budget_uses_full_encoded_input_length():
     helpers = _load_module(
         "rollout_native_budget_utils",
@@ -916,6 +992,9 @@ def test_postprocess_keeps_cap_signal_and_separates_finish_bonus():
         ),
         "normalize_finish_reason": helpers.normalize_finish_reason,
         "apply_finish_reward_bonus": helpers.apply_finish_reward_bonus,
+        "has_repetitive_assistant_turn": (
+            helpers.has_repetitive_assistant_turn
+        ),
         "transitions_to_training_data": functional.transitions_to_training_data,
         "chat_template": None,
         "chat_template_qwen3_thinking": None,
@@ -1091,12 +1170,29 @@ def test_postprocess_keeps_cap_signal_and_separates_finish_bonus():
         "finish": True,
         "finish_reason": "TRUNCATED_RESPONSE",
     }
+    repetitive_tokens = [31, 32] * 70 + [2]
+    repetitive_result = {
+        "instance_id": "issue",
+        "trajectory_id": 2,
+        "messages": [{"role": "assistant", "content": "repetitive prefix"}],
+        "transitions": [
+            functional.Transition(
+                ob=functional.Observation(input_ids=[30]),
+                ac=functional.TokensWithLogprobs(token_ids=repetitive_tokens),
+                reward=0.0,
+                episode_done=False,
+            )
+        ],
+        "reward": 1.0,
+        "finish": True,
+        "finish_reason": "CONTEXT_BUDGET_REACHED",
+    }
     prefix_runner = SimpleNamespace(
         cfg=SimpleNamespace(
             generator=SimpleNamespace(
-                num_trajectories=2,
+                num_trajectories=3,
                 val_config=SimpleNamespace(num_trajectories=1),
-                max_prompt_length=10,
+                max_prompt_length=256,
                 remove_think_tokens=False,
             )
         ),
@@ -1104,6 +1200,7 @@ def test_postprocess_keeps_cap_signal_and_separates_finish_bonus():
             "issue": {
                 0: SimpleNamespace(result=budget_result),
                 1: SimpleNamespace(result=truncated_result),
+                2: SimpleNamespace(result=repetitive_result),
             }
         },
         batch=runner.batch,
@@ -1115,14 +1212,27 @@ def test_postprocess_keeps_cap_signal_and_separates_finish_bonus():
         prefix_runner, val_mode=False
     )
 
-    assert prefix_output["response_ids"] == [[12], [22, 23, 24, 25]]
-    assert prefix_output["loss_masks"] == [[1.0], [0, 0, 0, 0]]
+    assert prefix_output["response_ids"][:2] == [[12], [22, 23, 24, 25]]
+    assert prefix_output["response_ids"][2] == repetitive_tokens
+    assert prefix_output["loss_masks"][:2] == [[1.0], [0, 0, 0, 0]]
+    assert prefix_output["loss_masks"][2] == [0] * len(repetitive_tokens)
     assert [
         record["finish_reason"] for record in prefix_output["trajectory_records"]
-    ] == ["CONTEXT_BUDGET_REACHED", "TRUNCATED_RESPONSE"]
+    ] == [
+        "CONTEXT_BUDGET_REACHED",
+        "TRUNCATED_RESPONSE",
+        "CONTEXT_BUDGET_REACHED",
+    ]
+    assert [
+        record["repetitive_generation"]
+        for record in prefix_output["trajectory_records"]
+    ] == [False, False, True]
     rollout_metrics = prefix_output["rollout_metrics"]
-    assert rollout_metrics["rollout_metrics/num_mask_out"] == 1
-    assert rollout_metrics["rollout_metrics/num_mask_non_zero_reward"] == 1
+    assert rollout_metrics["rollout_metrics/num_mask_out"] == 2
+    assert rollout_metrics["rollout_metrics/num_mask_non_zero_reward"] == 2
+    assert rollout_metrics["rollout_metrics/repetitive_generation_ratio"] == (
+        1 / 3
+    )
     assert rollout_metrics["rollout_metrics/reward_mean/finish_tool"] == 0.0
     assert rollout_metrics["rollout_metrics/positive_reward_rate/finish_tool"] == 0.0
     assert rollout_metrics["rollout_metrics/reward_mean/truncated_response"] == 1.0

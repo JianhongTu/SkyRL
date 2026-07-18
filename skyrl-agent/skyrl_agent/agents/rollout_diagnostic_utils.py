@@ -24,6 +24,12 @@ NON_FINISH_TERMINAL_REASONS = MASK_OUT_REASONS | {
 } | PREFIX_TRAINABLE_TERMINAL_REASONS
 FINISH_REWARD_BONUS = 0.05
 
+_REPETITION_WINDOW_TOKENS = 128
+_REPETITION_MAX_PERIOD = 32
+_REPETITION_MIN_MATCH_FRACTION = 0.90
+_REPETITION_NGRAM_SIZE = 4
+_REPETITION_MIN_DUPLICATE_NGRAM_FRACTION = 0.80
+
 _HERMES_TOOL_CALL_RE = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.DOTALL)
 _LEGACY_FINISH_RE = re.compile(
     r"<function=finish(?:\s[^>]*)?>.*?</function>", re.DOTALL
@@ -38,6 +44,47 @@ def bounded_max_tokens(configured: int, remaining: int) -> int:
 def remaining_generation_tokens(input_length: int, model_max_length: int) -> int:
     """Return the native model budget remaining after the full encoded input."""
     return max(0, model_max_length - input_length)
+
+
+def _has_repetitive_suffix(token_ids: list[int]) -> bool:
+    if len(token_ids) < _REPETITION_WINDOW_TOKENS:
+        return False
+
+    suffix = token_ids[-_REPETITION_WINDOW_TOKENS:]
+    for period in range(1, _REPETITION_MAX_PERIOD + 1):
+        comparable = len(suffix) - period
+        matches = sum(
+            suffix[index] == suffix[index - period]
+            for index in range(period, len(suffix))
+        )
+        if matches / comparable >= _REPETITION_MIN_MATCH_FRACTION:
+            return True
+
+    ngrams = {
+        tuple(suffix[index : index + _REPETITION_NGRAM_SIZE])
+        for index in range(len(suffix) - _REPETITION_NGRAM_SIZE + 1)
+    }
+    num_ngrams = len(suffix) - _REPETITION_NGRAM_SIZE + 1
+    duplicate_fraction = 1 - len(ngrams) / num_ngrams
+    return duplicate_fraction >= _REPETITION_MIN_DUPLICATE_NGRAM_FRACTION
+
+
+def has_repetitive_assistant_turn(
+    token_ids: list[int], assistant_mask: list[int]
+) -> bool:
+    """Detect periodic or low-diversity repetition in an assistant-turn suffix."""
+    if len(token_ids) != len(assistant_mask):
+        raise ValueError("token_ids and assistant_mask must have the same length")
+
+    assistant_turn: list[int] = []
+    for token_id, is_assistant in zip(token_ids, assistant_mask):
+        if is_assistant:
+            assistant_turn.append(token_id)
+        elif assistant_turn:
+            if _has_repetitive_suffix(assistant_turn):
+                return True
+            assistant_turn = []
+    return _has_repetitive_suffix(assistant_turn)
 
 
 def extract_exact_output_tokens(choice: dict[str, Any]) -> list[int]:

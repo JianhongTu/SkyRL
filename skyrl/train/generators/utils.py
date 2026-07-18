@@ -334,6 +334,15 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput], step
         rollout_metrics[f"rollout_metrics/positive_reward_rate/{metric_name}"] = (
             positive_count / trajectory_count if trajectory_count else 0.0
         )
+
+    repetition_count_key = "rollout_metrics/repetitive_generation_count"
+    repetition_total_key = "rollout_metrics/repetition_checked_trajectory_count"
+    if repetition_count_key in extra_keys and repetition_total_key in extra_keys:
+        repetition_count = sum(extra_keys[repetition_count_key])
+        repetition_total = sum(extra_keys[repetition_total_key])
+        rollout_metrics["rollout_metrics/repetitive_generation_ratio"] = (
+            repetition_count / repetition_total if repetition_total else 0.0
+        )
     result["rollout_metrics"] = rollout_metrics
 
     # Validate the generator output using the number of prompts

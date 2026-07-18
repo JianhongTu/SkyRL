@@ -129,6 +129,38 @@ def test_generator_output_concatenation_weights_finish_reason_reward_metrics():
     assert metrics["rollout_metrics/positive_reward_rate/finish_tool"] == 0.5
 
 
+def test_generator_output_concatenation_weights_repetition_ratio():
+    def output(sample_count, repetition_count):
+        return {
+            "prompt_token_ids": [[1]] * sample_count,
+            "response_ids": [[2]] * sample_count,
+            "rewards": [0.0] * sample_count,
+            "loss_masks": [[1]] * sample_count,
+            "stop_reasons": ["stop"] * sample_count,
+            "rollout_logprobs": None,
+            "rollout_metrics": {
+                "rollout_metrics/repetitive_generation_count": (
+                    repetition_count
+                ),
+                "rollout_metrics/repetition_checked_trajectory_count": (
+                    sample_count
+                ),
+                "rollout_metrics/repetitive_generation_ratio": (
+                    repetition_count / sample_count
+                ),
+            },
+        }
+
+    concatenated = concatenate_generator_outputs(
+        [output(sample_count=1, repetition_count=1), output(3, 0)]
+    )
+    metrics = concatenated["rollout_metrics"]
+
+    assert metrics["rollout_metrics/repetitive_generation_count"] == 1
+    assert metrics["rollout_metrics/repetition_checked_trajectory_count"] == 4
+    assert metrics["rollout_metrics/repetitive_generation_ratio"] == 0.25
+
+
 def test_get_metrics_from_generator_output():
     # Per trajectory rewards, where rewards are List[float]
     generator_output: GeneratorOutput = {
